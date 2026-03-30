@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dave's Weather Dash</title>
+    <title>WeatherHop</title>
 
     <!-- Tailwind (CDN) -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -406,6 +406,178 @@
         }
       }
 
+      function formatLocalIsoTime(localIso) {
+        if (!localIso) return "—";
+        try {
+          const d = new Date(localIso);
+          return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+        } catch {
+          return String(localIso).split("T")[1] ?? String(localIso);
+        }
+      }
+
+      function computeSunArcInfo({ dateISO, sunriseLocalIso, sunsetLocalIso, utcOffsetSeconds }) {
+        if (!dateISO || !sunriseLocalIso || !sunsetLocalIso) return null;
+
+        const currentLocal = new Date(Date.now() + (Number(utcOffsetSeconds) || 0) * 1000);
+        const hh = String(currentLocal.getUTCHours()).padStart(2, "0");
+        const mm = String(currentLocal.getUTCMinutes()).padStart(2, "0");
+        const probeUtc = localIsoToUtcMillis(`${dateISO}T${hh}:${mm}`, utcOffsetSeconds);
+        const sunriseUtc = localIsoToUtcMillis(sunriseLocalIso, utcOffsetSeconds);
+        const sunsetUtc = localIsoToUtcMillis(sunsetLocalIso, utcOffsetSeconds);
+        if (![probeUtc, sunriseUtc, sunsetUtc].every(Number.isFinite)) return null;
+
+        const duration = Math.max(1, sunsetUtc - sunriseUtc);
+        const progress = (probeUtc - sunriseUtc) / duration;
+        const clamped = Math.max(0, Math.min(1, progress));
+        const isDaylight = probeUtc >= sunriseUtc && probeUtc <= sunsetUtc;
+        const status = probeUtc < sunriseUtc ? "Sun not up yet" : probeUtc > sunsetUtc ? "Sun has set" : "Sun is up";
+        const arcHeightPx = Math.sin(clamped * Math.PI) * 68;
+
+        return { progress: clamped, isDaylight, status, arcHeightPx };
+      }
+
+      function formatDurationMs(ms) {
+        if (!Number.isFinite(ms) || ms <= 0) return "—";
+        const totalMinutes = Math.round(ms / 60000);
+        const h = Math.floor(totalMinutes / 60);
+        const m = totalMinutes % 60;
+        return `${h}h ${String(m).padStart(2, "0")}m`;
+      }
+
+      function degreesToCompass(deg) {
+        const value = Number(deg);
+        if (!Number.isFinite(value)) return "—";
+        const dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+        return dirs[Math.round((((value % 360) + 360) % 360) / 22.5) % 16];
+      }
+
+      function getStarViewingAssessment({ moonIllumination, weatherCode }) {
+        const illumPct = Number.isFinite(Number(moonIllumination)) ? Math.round(Number(moonIllumination) * 100) : null;
+        const code = Number(weatherCode);
+
+        const cloudyCodes = [3, 45, 48, 53, 55, 56, 57, 63, 65, 66, 67, 73, 75, 77, 81, 82, 85, 86, 95, 96, 99];
+        const partlyCodes = [1, 2, 51, 61, 71, 80];
+
+        let score = 100;
+        let skyText = "Clear skies";
+
+        if (cloudyCodes.includes(code)) {
+          score -= 55;
+          skyText = "Clouds or precip likely";
+        } else if (partlyCodes.includes(code)) {
+          score -= 25;
+          skyText = "Some cloud interference";
+        }
+
+        if (illumPct !== null) {
+          if (illumPct >= 90) score -= 30;
+          else if (illumPct >= 70) score -= 22;
+          else if (illumPct >= 40) score -= 12;
+          else if (illumPct >= 20) score -= 6;
+        }
+
+        score = Math.max(5, Math.min(95, score));
+
+        let label = "Excellent";
+        if (score < 35) label = "Poor";
+        else if (score < 55) label = "Fair";
+        else if (score < 75) label = "Good";
+
+        const moonText = illumPct === null ? "Moonlight unknown" : illumPct >= 70 ? "Bright moonlight" : illumPct >= 35 ? "Moderate moonlight" : "Low moonlight";
+        const detail = `${skyText} • ${moonText}`;
+        return { score, label, detail };
+      }
+
+      function ScrollHint({ isDarkUI, text = "Swipe to scroll" }) {
+        return (
+          <div className={`mt-2 flex items-center justify-end gap-2 text-[11px] font-medium ${isDarkUI ? "text-slate-300/90" : "text-slate-500"}`}>
+            <span aria-hidden="true">←</span>
+            <span>{text}</span>
+            <span aria-hidden="true">→</span>
+          </div>
+        );
+      }
+
+      function HourlyLineChart({
+        title,
+        labels,
+        values,
+        chartTitleDate,
+        isDarkUI,
+        nowIndex,
+        formatTooltip,
+        nowLineColor,
+      }) {
+        const canvasRef = useRef(null);
+        const chartRef = useRef(null);
+
+        useEffect(() => {
+          if (!labels?.length || !canvasRef.current || !window.Chart) return;
+
+          if (chartRef.current) {
+            chartRef.current.destroy();
+            chartRef.current = null;
+          }
+
+          const axisColor = isDarkUI ? "rgba(226,232,240,0.85)" : "rgba(107,114,128,0.95)";
+          const gridColor = isDarkUI ? "rgba(226,232,240,0.10)" : "rgba(17,24,39,0.06)";
+          const titleColor = isDarkUI ? "rgba(226,232,240,0.95)" : "#111827";
+          const effectiveNowLineColor = nowLineColor ?? (isDarkUI ? "rgba(56,189,248,0.85)" : "rgba(37,99,235,0.65)");
+          const nowLinePlugin = makeNowLinePlugin(() => nowIndex, () => effectiveNowLineColor);
+
+          const ctx = canvasRef.current.getContext("2d");
+          chartRef.current = new window.Chart(ctx, {
+            type: "line",
+            plugins: [nowLinePlugin],
+            data: {
+              labels,
+              datasets: [
+                {
+                  label: title,
+                  data: values,
+                  tension: 0.28,
+                  pointRadius: 0,
+                  borderWidth: 2,
+                },
+              ],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: { display: false },
+                title: {
+                  display: true,
+                  text: `${title} — ${chartTitleDate}`,
+                  color: titleColor,
+                  padding: { top: 6, bottom: 10 },
+                  font: { size: 14, weight: "600" },
+                },
+                tooltip: {
+                  callbacks: {
+                    label: (ctx) => formatTooltip?.(ctx.parsed.y) ?? ` ${ctx.parsed.y}`,
+                  },
+                },
+              },
+              scales: {
+                x: { ticks: { color: axisColor, maxTicksLimit: 10 }, grid: { color: gridColor } },
+                y: { ticks: { color: axisColor }, grid: { color: gridColor } },
+              },
+            },
+          });
+
+          return () => {
+            if (chartRef.current) {
+              chartRef.current.destroy();
+              chartRef.current = null;
+            }
+          };
+        }, [labels?.join(","), values?.join(","), title, chartTitleDate, isDarkUI, nowIndex]);
+
+        return <canvas ref={canvasRef}></canvas>;
+      }
+
       function WeatherApp() {
         // Favorites selection (kept)
         const [zip, setZip] = useState("84341");
@@ -450,8 +622,6 @@
         const searchBoxRef = useRef(null);
         const searchDebounceRef = useRef(null);
 
-        const chartCanvasRef = useRef(null);
-        const chartInstanceRef = useRef(null);
         const [nowTick, setNowTick] = useState(0);
 
         // ---------- Fetch helpers ----------
@@ -482,7 +652,7 @@
             forecast_days: "10",
             daily:
               "temperature_2m_max,temperature_2m_min,relative_humidity_2m_max,precipitation_sum,precipitation_probability_max,windspeed_10m_max,winddirection_10m_dominant,weathercode,sunrise,sunset",
-            hourly: "temperature_2m,relative_humidity_2m,dew_point_2m",
+            hourly: "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation_probability,wind_speed_10m",
             current: "temperature_2m,relative_humidity_2m,wind_speed_10m",
           });
 
@@ -756,6 +926,8 @@
           const hum = hourly?.relative_humidity_2m ?? [];
           const dew = hourly?.dew_point_2m ?? [];
           const temps = hourly?.temperature_2m ?? [];
+          const precipProbAll = hourly?.precipitation_probability ?? [];
+          const windAll = hourly?.wind_speed_10m ?? [];
 
           let humidityHigh24 = null;
           let dewPointLow24 = null;
@@ -786,7 +958,14 @@
           const maxHigh = highs.length ? Math.max(...highs) : null;
           const minLow = lows.length ? Math.min(...lows) : null;
 
-          let hourlyForDay = { date: selectedDate, isoTimes: [], labels: [], values: [] };
+          let hourlyForDay = {
+            date: selectedDate,
+            isoTimes: [],
+            labels: [],
+            tempValues: [],
+            precipValues: [],
+            windValues: [],
+          };
           if (selectedDate && times.length && temps.length) {
             const idxs = [];
             for (let i = 0; i < times.length; i++) if (String(times[i]).startsWith(selectedDate)) idxs.push(i);
@@ -794,9 +973,19 @@
               date: selectedDate,
               isoTimes: idxs.map((i) => times[i]),
               labels: idxs.map((i) => formatHourLabel(times[i])),
-              values: idxs.map((i) => (Number.isFinite(Number(temps[i])) ? Number(temps[i]) : null)),
+              tempValues: idxs.map((i) => (Number.isFinite(Number(temps[i])) ? Number(temps[i]) : null)),
+              precipValues: idxs.map((i) => (Number.isFinite(Number(precipProbAll[i])) ? Number(precipProbAll[i]) : null)),
+              windValues: idxs.map((i) => (Number.isFinite(Number(windAll[i])) ? Number(windAll[i]) : null)),
             };
           }
+
+          const selectedDayData = tenDay.find((d) => d.date === selectedDate) ?? tenDay[0] ?? null;
+          const sunriseUtc = localIsoToUtcMillis(selectedDayData?.sunrise, data?.utc_offset_seconds ?? 0);
+          const sunsetUtc = localIsoToUtcMillis(selectedDayData?.sunset, data?.utc_offset_seconds ?? 0);
+          const daylightDuration =
+            Number.isFinite(sunriseUtc) && Number.isFinite(sunsetUtc) && sunsetUtc > sunriseUtc
+              ? sunsetUtc - sunriseUtc
+              : null;
 
           const feelsLike = computeFeelsLikeF(
             data?.current?.temperature_2m,
@@ -814,6 +1003,8 @@
             maxHigh,
             minLow,
             hourlyForDay,
+            selectedDayData,
+            daylightDuration,
             currentTemp: data?.current?.temperature_2m,
             currentHumidity: data?.current?.relative_humidity_2m,
             currentWind: data?.current?.wind_speed_10m,
@@ -833,6 +1024,37 @@
             })
           );
         }, [nowTick, utcOffsetSeconds, derived?.tenDay?.[0]?.sunrise, derived?.tenDay?.[0]?.sunset]);
+
+        useEffect(() => {
+          if (!place?.lat || !place?.lon || !selectedDate) return;
+          try {
+            setPlanets10pm(
+              computeVisiblePlanetsAt10pmLocal({
+                lat: place.lat,
+                lon: place.lon,
+                utcOffsetSeconds,
+                dateISO: selectedDate,
+                tzName,
+              })
+            );
+          } catch (e) {
+            console.warn("Planets calc failed", e);
+          }
+
+          try {
+            setMoonRiseSet(
+              computeMoonRiseSetForDate({
+                lat: place.lat,
+                lon: place.lon,
+                utcOffsetSeconds,
+                dateISO: selectedDate,
+                tzName,
+              }) ?? { rise: "—", set: "—" }
+            );
+          } catch {
+            setMoonRiseSet({ rise: "—", set: "—" });
+          }
+        }, [place?.lat, place?.lon, selectedDate, utcOffsetSeconds, tzName]);
 
         // where to draw "now" line on chart (only when viewing today)
         const nowIndex = useMemo(() => {
@@ -871,6 +1093,16 @@
           if (idx >= 0 && idx < days.length - 1) setSelectedDate(days[idx + 1]);
         }
 
+        const sunArc = useMemo(() => {
+          if (!derived?.selectedDayData) return null;
+          return computeSunArcInfo({
+            dateISO: derived.selectedDayData.date,
+            sunriseLocalIso: derived.selectedDayData.sunrise,
+            sunsetLocalIso: derived.selectedDayData.sunset,
+            utcOffsetSeconds,
+          });
+        }, [derived?.selectedDayData?.date, derived?.selectedDayData?.sunrise, derived?.selectedDayData?.sunset, utcOffsetSeconds, nowTick]);
+
         const isDarkUI = bgMode !== "day";
         const bgClass =
           bgMode === "night"
@@ -882,82 +1114,7 @@
         const borderSoft = isDarkUI ? "border-white/10" : "border-black/5";
         const cardText = isDarkUI ? "text-slate-100" : "text-slate-900";
         const subText = isDarkUI ? "text-slate-300" : "text-slate-600";
-
-        // Build/update hourly chart
         const chartTitleDate = derived?.hourlyForDay?.date ? formatDateLabel(derived.hourlyForDay.date) : "—";
-
-        useEffect(() => {
-          if (!derived?.hourlyForDay?.labels?.length) return;
-          if (!chartCanvasRef.current) return;
-          if (!window.Chart) return;
-
-          if (chartInstanceRef.current) {
-            chartInstanceRef.current.destroy();
-            chartInstanceRef.current = null;
-          }
-
-          const axisColor = isDarkUI ? "rgba(226,232,240,0.85)" : "rgba(107,114,128,0.95)";
-          const gridColor = isDarkUI ? "rgba(226,232,240,0.10)" : "rgba(17,24,39,0.06)";
-          const titleColor = isDarkUI ? "rgba(226,232,240,0.95)" : "#111827";
-          const nowLineColor = isDarkUI ? "rgba(56,189,248,0.85)" : "rgba(37,99,235,0.65)";
-
-          const nowLinePlugin = makeNowLinePlugin(() => nowIndex, () => nowLineColor);
-
-          const ctx = chartCanvasRef.current.getContext("2d");
-          chartInstanceRef.current = new window.Chart(ctx, {
-            type: "line",
-            plugins: [nowLinePlugin],
-            data: {
-              labels: derived.hourlyForDay.labels,
-              datasets: [
-                {
-                  label: "Temperature (°F)",
-                  data: derived.hourlyForDay.values,
-                  tension: 0.28,
-                  pointRadius: 0,
-                  borderWidth: 2,
-                },
-              ],
-            },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              plugins: {
-                legend: { display: false },
-                title: {
-                  display: true,
-                  text: `Hourly temps — ${chartTitleDate}`,
-                  color: titleColor,
-                  padding: { top: 6, bottom: 10 },
-                  font: { size: 14, weight: "600" },
-                },
-                tooltip: {
-                  callbacks: {
-                    label: (ctx) => ` ${Math.round(ctx.parsed.y)}°F`,
-                  },
-                },
-              },
-              scales: {
-                x: { ticks: { color: axisColor, maxTicksLimit: 10 }, grid: { color: gridColor } },
-                y: { ticks: { color: axisColor }, grid: { color: gridColor } },
-              },
-            },
-          });
-
-          return () => {
-            if (chartInstanceRef.current) {
-              chartInstanceRef.current.destroy();
-              chartInstanceRef.current = null;
-            }
-          };
-        }, [
-          derived?.hourlyForDay?.date,
-          derived?.hourlyForDay?.labels?.join(","),
-          derived?.hourlyForDay?.values?.join(","),
-          nowIndex,
-          bgMode,
-          chartTitleDate,
-        ]);
 
         // Favorites label (for dropdown selection)
         const tzDisplay = prettyTimezoneName(tzName);
@@ -1036,6 +1193,13 @@
         }, []);
 
         // Comparison model vs current active location
+        const nightSkyAssessment = useMemo(() => {
+          return getStarViewingAssessment({
+            moonIllumination: moon?.illumination,
+            weatherCode: derived?.selectedDayData?.code,
+          });
+        }, [moon?.illumination, derived?.selectedDayData?.code]);
+
         const compareRows = useMemo(() => {
           const baseTemp = derived?.currentTemp;
           const baseHum = derived?.currentHumidity;
@@ -1102,12 +1266,12 @@
             <div className="mx-auto max-w-6xl px-4 py-8">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                 <div>
-                  <h1 className={`text-3xl font-semibold tracking-tight ${isDarkUI ? "text-white" : "text-slate-900"}`}>
-                    Dave&apos;s Weather Dash
-                  </h1>
-                  <div className={`mt-1 text-sm ${subText}`}>
-                    Timezone:{" "}
-                    <span className={`font-medium ${isDarkUI ? "text-slate-100" : "text-slate-800"}`}>{tzDisplay}</span>
+                  <div className="flex items-center">
+                    <img
+                      src="./weatherhop_logo_cropped_tight.png"
+                      alt="WeatherHop"
+                      className="h-32 w-auto sm:h-25"
+                    />
                   </div>
                 </div>
 
@@ -1251,7 +1415,7 @@
               <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
                 {/* LEFT */}
                 <div className={`rounded-3xl border p-6 ${cardBg} ${borderSoft} shadow-[0_10px_30px_rgba(0,0,0,0.10)] ${cardText}`}>
-                  <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Location</div>
+                  <div className={`text-sm font-semibold tracking-wide ${subText}`}>Location</div>
                   <div className="mt-2 text-lg font-semibold">
                     {locationTitle}
                     <span className={`${isDarkUI ? "text-slate-300" : "text-slate-500"} font-normal`}> • </span>
@@ -1314,116 +1478,246 @@
                       </div>
                     </div>
                   </div>
+
+                  <div className={`mt-4 rounded-2xl p-4 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                    <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Today details</div>
+                    <div className={`mt-1 text-sm ${subText}`}>Helpful at-a-glance conditions</div>
+                    <div className="mt-3 grid grid-cols-2 gap-3">
+                      <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-white ring-black/5"}`}>
+                        <div className={`text-xs ${subText}`}>Rain Chance</div>
+                        <div className="mt-1 text-xl font-semibold">{formatPct(derived?.selectedDayData?.precipProb)}</div>
+                      </div>
+                      <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-white ring-black/5"}`}>
+                        <div className={`text-xs ${subText}`}>Precip Total</div>
+                        <div className="mt-1 text-xl font-semibold">{formatInches(derived?.selectedDayData?.precip)}</div>
+                      </div>
+                      <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-white ring-black/5"}`}>
+                        <div className={`text-xs ${subText}`}>Wind Max</div>
+                        <div className="mt-1 text-xl font-semibold">{formatMph(derived?.selectedDayData?.windMax)}</div>
+                      </div>
+                      <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-white ring-black/5"}`}>
+                        <div className={`text-xs ${subText}`}>Wind Dir</div>
+                        <div className="mt-1 text-xl font-semibold">{degreesToCompass(derived?.selectedDayData?.windDir)}</div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 {/* MIDDLE */}
                 <div className={`rounded-3xl border p-6 ${cardBg} ${borderSoft} shadow-[0_10px_30px_rgba(0,0,0,0.10)] ${cardText}`}>
-                  <div className="flex items-end justify-between">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                     <div>
-                      <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Hourly temperature</div>
-                      <div className={`mt-1 text-sm ${subText}`}>Click a date in the 10-day forecast</div>
+                      <div className={`text-sm font-semibold tracking-wide ${subText}`}>Hourly Forecast</div>
                     </div>
-                    <div className={`text-xs ${subText}`}>{selectedDate ? formatDateLabel(selectedDate) : ""}</div>
+                    <div className="flex items-center gap-2 self-start sm:self-auto">
+                      <button
+                        onClick={goPrevDay}
+                        disabled={canPrevNext.idx <= 0}
+                        title="Previous day"
+                        className={`rounded-full px-3 py-1.5 text-sm font-semibold shadow ${
+                          isDarkUI ? "bg-white/10 text-white hover:bg-white/15 disabled:opacity-30" : "bg-black/5 text-slate-900 hover:bg-black/10 disabled:opacity-30"
+                        }`}
+                      >
+                        ‹
+                      </button>
+                      <div className={`min-w-[150px] text-center text-xs font-semibold ${subText}`}>{selectedDate ? formatDateLabel(selectedDate) : ""}</div>
+                      <button
+                        onClick={goNextDay}
+                        disabled={canPrevNext.idx < 0 || canPrevNext.idx >= canPrevNext.days.length - 1}
+                        title="Next day"
+                        className={`rounded-full px-3 py-1.5 text-sm font-semibold shadow ${
+                          isDarkUI ? "bg-white/10 text-white hover:bg-white/15 disabled:opacity-30" : "bg-black/5 text-slate-900 hover:bg-black/10 disabled:opacity-30"
+                        }`}
+                      >
+                        ›
+                      </button>
+                    </div>
                   </div>
 
-                  <div className={`mt-4 relative h-[320px] rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-black/20 ring-white/10" : "bg-white ring-black/5"}`}>
-                    {/* Left/right day nav buttons */}
-                    <button
-                      onClick={goPrevDay}
-                      disabled={canPrevNext.idx <= 0}
-                      title="Previous day"
-                      className={`absolute left-2 top-1/2 -translate-y-1/2 rounded-full px-2 py-1 text-xs shadow ${
-                        isDarkUI ? "bg-white/10 text-white hover:bg-white/15 disabled:opacity-30" : "bg-black/5 text-slate-900 hover:bg-black/10 disabled:opacity-30"
-                      }`}
-                    >
-                      ‹
-                    </button>
+                  <div className="mt-4 grid grid-cols-1 gap-4">
+                    <div className={`relative h-[220px] rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-black/20 ring-white/10" : "bg-white ring-black/5"}`}>
+                      <HourlyLineChart
+                        title="Temperature (°F)"
+                        labels={derived?.hourlyForDay?.labels ?? []}
+                        values={derived?.hourlyForDay?.tempValues ?? []}
+                        chartTitleDate={chartTitleDate}
+                        isDarkUI={isDarkUI}
+                        nowIndex={nowIndex}
+                        formatTooltip={(y) => ` ${Math.round(y)}°F`}
+                      />
+                    </div>
 
-                    <button
-                      onClick={goNextDay}
-                      disabled={canPrevNext.idx < 0 || canPrevNext.idx >= canPrevNext.days.length - 1}
-                      title="Next day"
-                      className={`absolute right-2 top-1/2 -translate-y-1/2 rounded-full px-2 py-1 text-xs shadow ${
-                        isDarkUI ? "bg-white/10 text-white hover:bg-white/15 disabled:opacity-30" : "bg-black/5 text-slate-900 hover:bg-black/10 disabled:opacity-30"
-                      }`}
-                    >
-                      ›
-                    </button>
+                    <div className={`relative h-[220px] rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-black/20 ring-white/10" : "bg-white ring-black/5"}`}>
+                      <HourlyLineChart
+                        title="Precipitation Chance (%)"
+                        labels={derived?.hourlyForDay?.labels ?? []}
+                        values={derived?.hourlyForDay?.precipValues ?? []}
+                        chartTitleDate={chartTitleDate}
+                        isDarkUI={isDarkUI}
+                        nowIndex={nowIndex}
+                        formatTooltip={(y) => ` ${Math.round(y)}%`}
+                      />
+                    </div>
 
-                    <canvas ref={chartCanvasRef}></canvas>
-                    {!derived?.hourlyForDay?.labels?.length ? (
-                      <div className={`mt-3 text-center text-sm ${subText}`}>No hourly data for selected date.</div>
-                    ) : null}
+                    <div className={`relative h-[220px] rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-black/20 ring-white/10" : "bg-white ring-black/5"}`}>
+                      <HourlyLineChart
+                        title="Wind (mph)"
+                        labels={derived?.hourlyForDay?.labels ?? []}
+                        values={derived?.hourlyForDay?.windValues ?? []}
+                        chartTitleDate={chartTitleDate}
+                        isDarkUI={isDarkUI}
+                        nowIndex={nowIndex}
+                        formatTooltip={(y) => ` ${Math.round(y)} mph`}
+                      />
+                    </div>
                   </div>
+
+                  {!derived?.hourlyForDay?.labels?.length ? (
+                    <div className={`mt-3 text-center text-sm ${subText}`}>No hourly data for selected date.</div>
+                  ) : null}
                 </div>
 
                 {/* RIGHT */}
-                <div className="grid grid-cols-1 gap-4">
-                  <div className={`rounded-3xl border p-6 ${cardBg} ${borderSoft} shadow-[0_10px_30px_rgba(0,0,0,0.10)] ${cardText}`}>
-                    <div className="flex items-center justify-between">
+                <div className={`rounded-3xl border p-6 ${cardBg} ${borderSoft} shadow-[0_10px_30px_rgba(0,0,0,0.10)] ${cardText}`}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className={`text-sm font-semibold tracking-wide ${subText}`}>Astronomy</div>
+                      <div className="mt-1 text-lg font-semibold">{moon ? moon.name : "—"}</div>
+                      <div className={`mt-1 text-sm ${subText}`}>{moon ? `Moon illumination: ${Math.round(moon.illumination * 100)}%` : ""}</div>
+                    </div>
+                    <div className="text-5xl" aria-label="Moon phase">{moon ? moon.icon : "🌙"}</div>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+                    <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                      <div className={`text-xs ${subText}`}>Sunrise</div>
+                      <div className="mt-1 text-sm font-semibold">{formatLocalIsoTime(derived?.selectedDayData?.sunrise)}</div>
+                    </div>
+                    <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                      <div className={`text-xs ${subText}`}>Sunset</div>
+                      <div className="mt-1 text-sm font-semibold">{formatLocalIsoTime(derived?.selectedDayData?.sunset)}</div>
+                    </div>
+                    <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                      <div className={`text-xs ${subText}`}>Moonrise</div>
+                      <div className="mt-1 text-sm font-semibold">{moonRiseSet?.rise ?? "—"}</div>
+                    </div>
+                    <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                      <div className={`text-xs ${subText}`}>Moonset</div>
+                      <div className="mt-1 text-sm font-semibold">{moonRiseSet?.set ?? "—"}</div>
+                    </div>
+                  </div>
+
+                  <div className={`mt-4 rounded-2xl p-4 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                    <div className="flex items-center justify-between gap-3">
                       <div>
-                        <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Moon</div>
-                        <div className="mt-1 text-lg font-semibold">{moon ? moon.name : "—"}</div>
-                        <div className={`mt-1 text-sm ${subText}`}>{moon ? `Illumination: ${Math.round(moon.illumination * 100)}%` : ""}</div>
+                        <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Sun path</div>
+                        <div className={`mt-1 text-sm ${subText}`}>{sunArc?.status ?? "Sun position unavailable"}</div>
                       </div>
-                      <div className="text-5xl" aria-label="Moon phase">{moon ? moon.icon : "🌙"}</div>
+                      <div className="text-2xl" aria-hidden="true">☀️</div>
                     </div>
 
-                    <div className="mt-4 grid grid-cols-2 gap-3">
-                      <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
-                        <div className={`text-xs ${subText}`}>Moonrise</div>
-                        <div className="mt-1 text-sm font-semibold">{moonRiseSet?.rise ?? "—"}</div>
+                    <div className="mt-3 grid grid-cols-2 gap-3">
+                      <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-white ring-black/5"}`}>
+                        <div className={`text-xs ${subText}`}>Daylight</div>
+                        <div className="mt-1 text-sm font-semibold">{formatDurationMs(derived?.daylightDuration)}</div>
                       </div>
-                      <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
-                        <div className={`text-xs ${subText}`}>Moonset</div>
-                        <div className="mt-1 text-sm font-semibold">{moonRiseSet?.set ?? "—"}</div>
+                      <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-white ring-black/5"}`}>
+                        <div className={`text-xs ${subText}`}>Selected Day</div>
+                        <div className="mt-1 text-sm font-semibold">{selectedDate ? formatDateLabel(selectedDate) : "—"}</div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 relative h-20 overflow-hidden">
+                      <div className={`absolute bottom-0 left-0 right-0 h-px ${isDarkUI ? "bg-white/20" : "bg-slate-300"}`}></div>
+                      <div className={`absolute bottom-0 left-1/2 h-14 w-[1px] -translate-x-1/2 ${isDarkUI ? "bg-white/10" : "bg-slate-300/70"}`}></div>
+                      <div className={`absolute bottom-0 left-[8%] right-[8%] h-20 rounded-t-full border-x border-t ${isDarkUI ? "border-white/15" : "border-slate-300"}`}></div>
+                      <div
+                        className="absolute text-xl transition-all duration-700"
+                        style={{
+                          left: `calc(8% + ${(sunArc?.progress ?? 0) * 84}%)`,
+                          bottom: `${sunArc?.isDaylight ? sunArc?.arcHeightPx ?? 0 : 0}px`,
+                          transform: "translate(-50%, 45%)",
+                          opacity: sunArc?.isDaylight ? 1 : 0.4,
+                        }}
+                      >
+                        ☀️
                       </div>
                     </div>
                   </div>
 
-                  <div className={`rounded-3xl border p-6 ${cardBg} ${borderSoft} shadow-[0_10px_30px_rgba(0,0,0,0.10)] ${cardText}`}>
+                  <div className={`mt-4 rounded-2xl p-4 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Planets visible</div>
-                        <div className={`mt-1 text-sm ${subText}`}>At 10:00 PM local time</div>
+                        <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Night sky</div>
+                        <div className="mt-1 text-sm font-semibold">{nightSkyAssessment?.label ?? "—"}</div>
                       </div>
-                      <div className={`text-xs ${subText} text-right`}>{planets10pm?.localLabel ?? ""}</div>
+                      <div className={`text-sm font-semibold ${subText}`}>{nightSkyAssessment?.score ?? "—"}/100</div>
                     </div>
 
-                    {!planets10pm ? (
-                      <div className={`mt-4 text-sm ${subText}`}>Calculating planets…</div>
-                    ) : planets10pm?.error ? (
-                      <div className={`mt-4 text-sm ${subText}`}>{planets10pm.error}</div>
-                    ) : (planets10pm.visible?.length ?? 0) === 0 ? (
-                      <div className={`mt-4 text-sm ${subText}`}>No planets are above the horizon at 10:00 PM local time.</div>
-                    ) : (
-                      <div className="mt-4 flex flex-col gap-2">
-                        {planets10pm.visible.map((p) => (
-                          <div
-                            key={p.name}
-                            className={`flex items-center justify-between gap-3 rounded-2xl px-3 py-2 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}
-                            title={`${p.name} • Alt ${p.altitude.toFixed(1)}° • Mag ${p.magnitude === null ? "—" : p.magnitude.toFixed(1)}`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="text-2xl" aria-label={`${p.name} icon`}>{planetIcon(p.name)}</div>
-                              <div>
-                                <div className="text-sm font-semibold">{p.name}</div>
-                                <div className={`text-xs ${subText}`}>
-                                  Rise:{" "}
-                                  <span className={`font-medium ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>{p.rise ?? "—"}</span>
-                                  <span className="mx-1">•</span>
-                                  Set:{" "}
-                                  <span className={`font-medium ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>{p.set ?? "—"}</span>
-                                </div>
+                    <div className="mt-4">
+                      <div className="relative h-4 overflow-hidden rounded-full ring-1 ring-black/5">
+                        <div
+                          className="absolute inset-0"
+                          style={{
+                            background: "linear-gradient(90deg, #ef4444 0%, #f59e0b 45%, #84cc16 70%, #22c55e 100%)",
+                            opacity: isDarkUI ? 0.9 : 0.85,
+                          }}
+                        />
+                        <div
+                          className={`absolute top-1/2 h-6 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full shadow ${isDarkUI ? "bg-white" : "bg-slate-900"}`}
+                          style={{ left: `${Math.max(0, Math.min(100, Number(nightSkyAssessment?.score ?? 0)))}%` }}
+                        />
+                      </div>
+                      <div className={`mt-2 flex justify-between text-[11px] ${subText}`}>
+                        <span>Poor</span>
+                        <span>Fair</span>
+                        <span>Good</span>
+                        <span>Excellent</span>
+                      </div>
+                    </div>
+
+                    <div className={`mt-3 text-sm ${subText}`}>{nightSkyAssessment?.detail ?? "Assessment unavailable"}</div>
+                  </div>
+
+                  <div className="mt-4 flex items-start justify-between gap-3">
+                    <div>
+                      <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Planets visible</div>
+                      <div className={`mt-1 text-sm ${subText}`}>At 10:00 PM local time</div>
+                    </div>
+                    <div className={`text-xs ${subText} text-right`}>{planets10pm?.localLabel ?? ""}</div>
+                  </div>
+
+                  {!planets10pm ? (
+                    <div className={`mt-4 text-sm ${subText}`}>Calculating planets…</div>
+                  ) : planets10pm?.error ? (
+                    <div className={`mt-4 text-sm ${subText}`}>{planets10pm.error}</div>
+                  ) : (planets10pm.visible?.length ?? 0) === 0 ? (
+                    <div className={`mt-4 text-sm ${subText}`}>No planets are above the horizon at 10:00 PM local time.</div>
+                  ) : (
+                    <div className="mt-4 flex flex-col gap-2">
+                      {planets10pm.visible.map((p) => (
+                        <div
+                          key={p.name}
+                          className={`flex items-center justify-between gap-3 rounded-2xl px-3 py-2 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}
+                          title={`${p.name} • Alt ${p.altitude.toFixed(1)}° • Mag ${p.magnitude === null ? "—" : p.magnitude.toFixed(1)}`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="text-2xl" aria-label={`${p.name} icon`}>{planetIcon(p.name)}</div>
+                            <div>
+                              <div className="text-sm font-semibold">{p.name}</div>
+                              <div className={`text-xs ${subText}`}>
+                                Rise: <span className={`font-medium ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>{p.rise ?? "—"}</span>
+                                <span className="mx-1">•</span>
+                                Set: <span className={`font-medium ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>{p.set ?? "—"}</span>
                               </div>
                             </div>
-
-                            <div className={`text-xs ${subText} text-right`}>Alt {p.altitude.toFixed(0)}°</div>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+
+                          <div className={`text-xs ${subText} text-right`}>Alt {p.altitude.toFixed(0)}°</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1434,10 +1728,11 @@
                     <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>10-day forecast</div>
                     <div className={`mt-1 text-sm ${subText}`}>High • Low • Humidity • PoP • Precip • Wind (max)</div>
                   </div>
-                  <div className={`text-xs ${subText}`}>Tip: click a row</div>
+                  <div className={`text-xs ${subText}`}>Tip: click a row • swipe on mobile</div>
                 </div>
 
-                <div className="mt-4 overflow-x-auto">
+                <ScrollHint isDarkUI={isDarkUI} text="Swipe forecast table" />
+                <div className="mt-2 overflow-x-auto pb-2">
                   <table className="w-full min-w-[1240px] border-separate border-spacing-y-2">
                     <thead>
                       <tr className={`text-left text-xs ${subText}`}>
@@ -1499,12 +1794,8 @@
                             <td className="px-3 py-3 text-sm font-semibold">{formatDateLabel(d.date)}</td>
                             <td className="px-3 py-3 text-xl">
                               {weatherIcon(d.code)}{" "}
-                              {isMaxHigh ? <span title="Highest high">🔥</span> : null}
-                              {isMinLow ? (
-                                <span title="Lowest low" className="ml-1">
-                                  ❄️
-                                </span>
-                              ) : null}
+                              {isMaxHigh ? <span title="Highest high" className="ml-2 text-[10px] font-bold tracking-wide text-rose-500 align-middle">HOTTEST</span> : null}
+                              {isMinLow ? <span title="Lowest low" className="ml-2 text-[10px] font-bold tracking-wide text-sky-500 align-middle">COLDEST</span> : null}
                             </td>
                             <td className={`px-3 py-3 text-sm ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>
                               {weatherLabel(d.code)}
@@ -1535,7 +1826,8 @@
                   <div className={`text-xs ${subText}`}>Blue = lower/earlier • Red = higher/later</div>
                 </div>
 
-                <div className="mt-4 overflow-x-auto">
+                <ScrollHint isDarkUI={isDarkUI} text="Swipe comparison table" />
+                <div className="mt-2 overflow-x-auto pb-2">
                   <table className="w-full min-w-[920px] border-separate border-spacing-y-2">
                     <thead>
                       <tr className={`text-left text-xs ${subText}`}>
@@ -1598,7 +1890,7 @@
           </div>
         );
       }
-
+// comment
       ReactDOM.createRoot(document.getElementById("root")).render(<WeatherApp />);
     </script>
   </body>
