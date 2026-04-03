@@ -40,14 +40,6 @@
     <script type="text/babel">
       const { useEffect, useMemo, useRef, useState } = React;
 
-      const ZIP_LABELS = {
-        "84321": "Christina/Katelyn",
-        "84341": "Mom & Dad",
-        "32704": "Murriott",
-        "84770": "St. George",
-      };
-      const ZIP_OPTIONS = ["84321", "84341", "32704", "84770"];
-
       const GEO_API = "https://geocoding-api.open-meteo.com/v1/search";
       const ZIP_API = "https://api.zippopotam.us/us/";
 
@@ -85,6 +77,15 @@
         }
       }
 
+      function formatWeekdayLabel(isoDate) {
+        try {
+          const d = new Date(`${isoDate}T12:00:00`);
+          return new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(d);
+        } catch {
+          return isoDate;
+        }
+      }
+
       function formatHourLabel(iso) {
         try {
           const d = new Date(iso);
@@ -101,6 +102,82 @@
       function nicePlaceLabel({ name, admin1, country_code }) {
         const parts = [name, admin1, country_code].filter(Boolean);
         return parts.join(", ");
+      }
+
+      function makeFavoriteKey(fav) {
+        if (!fav || !fav.mode) return "";
+        if (fav.mode === "zip") return `zip:${fav.zip}`;
+        if (fav.mode === "geo") return `geo:${fav.lat}:${fav.lon}`;
+        return `unknown:${fav.label || ""}`;
+      }
+
+      function favoriteDisplayLabel(fav) {
+        if (!fav) return "";
+        if (fav.label) return fav.label;
+        if (fav.mode === "zip") return fav.zip || "ZIP";
+        if (fav.mode === "geo") {
+          return fav.city ? `${fav.city}${fav.state ? `, ${fav.state}` : ""}` : `Geo ${fav.lat},${fav.lon}`;
+        }
+        return "Favorite";
+      }
+
+      function ThermometerBadge({ color = "#ef4444", label, level = "high" }) {
+        const fillTop = level === "low" ? 10.8 : 5.4;
+        const stemHeight = 16 - fillTop;
+        return (
+          <span className="inline-flex align-middle" role="img" aria-label={label} title={label}>
+            <svg width="24" height="26" viewBox="0 0 24 26" aria-hidden="true">
+              <path
+                d="M17.5 5h5"
+                fill="none"
+                stroke="#111827"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              ></path>
+              <path
+                d="M17.5 10h5"
+                fill="none"
+                stroke="#111827"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              ></path>
+              <path
+                d="M17.5 15h5"
+                fill="none"
+                stroke="#111827"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              ></path>
+              <path
+                d="M17.5 20h5"
+                fill="none"
+                stroke="#111827"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              ></path>
+              <path
+                d="M8 2c-2 0-3.6 1.6-3.6 3.6v11.2a5 5 0 1 0 7.2 0V5.6C11.6 3.6 10 2 8 2Z"
+                fill="#fff"
+                stroke="#111827"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              ></path>
+              <circle cx="8" cy="18.8" r="3.2" fill={color}></circle>
+              <path
+                d={`M8 ${fillTop}c-1 0-1.8.8-1.8 1.8V16h3.6V${fillTop + 1.8}c0-1-.8-1.8-1.8-1.8Z`}
+                fill={color}
+              ></path>
+              <path
+                d={`M8 ${fillTop}v${stemHeight}`}
+                fill="none"
+                stroke={color}
+                strokeWidth="1.1"
+                strokeLinecap="round"
+              ></path>
+            </svg>
+          </span>
+        );
       }
 
       function weatherIcon(code) {
@@ -581,19 +658,105 @@
       }
 
       function WeatherApp() {
+        // Favorites state (persistent)
+        const [favorites, setFavorites] = useState([]);
+        const [defaultZip, setDefaultZip] = useState(null);
+        const [favoritesLoaded, setFavoritesLoaded] = useState(false);
+        const [showManage, setShowManage] = useState(false);
+
         // Favorites selection (kept)
-        const [zip, setZip] = useState("84341");
+        const [zip, setZip] = useState(null);
+
+        const zipLabels = useMemo(() => Object.fromEntries(favorites.map((f) => [f.zip || "", f.label])), [favorites]);
+
+        // Load favorites from localStorage
+        useEffect(() => {
+          const saved = localStorage.getItem('weatherhop-favorites');
+          if (saved) {
+            try {
+              const data = JSON.parse(saved);
+              setFavorites(data.favorites || []);
+              setDefaultZip(data.defaultZip || null);
+            } catch (e) {
+              console.warn('Failed to load favorites', e);
+            }
+          } else {
+            // Seed with defaults
+            const defaults = [
+              { mode: "zip", zip: "84341", label: "Mom & Dad" },
+              { mode: "zip", zip: "84321", label: "Christina/Katelyn" },
+              { mode: "zip", zip: "32704", label: "Murriott" },
+              { mode: "zip", zip: "84770", label: "St. George" }
+            ];
+            setFavorites(defaults);
+            setDefaultZip("84341");
+          }
+          setFavoritesLoaded(true);
+        }, []);
+
+        // Save favorites to localStorage
+        useEffect(() => {
+          if (favoritesLoaded) {
+            localStorage.setItem('weatherhop-favorites', JSON.stringify({ favorites, defaultZip }));
+          }
+        }, [favorites, defaultZip, favoritesLoaded]);
+
+        // Set initial zip when loaded
+        useEffect(() => {
+          if (favoritesLoaded && zip === null) {
+            setZip(defaultZip || favorites[0]?.zip || "84341");
+          }
+        }, [favoritesLoaded, defaultZip, favorites, zip]);
 
         // Active location: either a favorite ZIP, or a searched geo location
         const [activeLocation, setActiveLocation] = useState({
           mode: "zip", // "zip" | "geo"
           zip: "84341",
-          label: ZIP_LABELS["84341"] ?? "84341",
+          label: "Mom & Dad",
           lat: null,
           lon: null,
           city: null,
           state: null,
         });
+
+        const isActiveFavorited = useMemo(() => {
+          if (!activeLocation || !favoritesLoaded) return false;
+          if (activeLocation.mode === "zip" && activeLocation.zip) {
+            return favorites.some((f) => f.zip === activeLocation.zip);
+          }
+          if (activeLocation.mode === "geo" && Number.isFinite(Number(activeLocation.lat)) && Number.isFinite(Number(activeLocation.lon))) {
+            return favorites.some(
+              (f) =>
+                f.mode === "geo" &&
+                Number(f.lat) === Number(activeLocation.lat) &&
+                Number(f.lon) === Number(activeLocation.lon)
+            );
+          }
+          return false;
+        }, [activeLocation, favorites, favoritesLoaded]);
+
+        const canSaveActive = useMemo(() => {
+          if (!favoritesLoaded || !activeLocation) return false;
+          if (activeLocation.mode === "zip") return !!activeLocation.zip;
+          if (activeLocation.mode === "geo") return Number.isFinite(Number(activeLocation.lat)) && Number.isFinite(Number(activeLocation.lon));
+          return false;
+        }, [favoritesLoaded, activeLocation]);
+
+        const favoriteOptions = useMemo(() => {
+          if (!Array.isArray(favorites)) return [];
+          return favorites.map((f) => ({
+            ...f,
+            key: makeFavoriteKey(f),
+            display: favoriteDisplayLabel(f),
+          }));
+        }, [favorites]);
+
+        const selectedFavoriteKey = useMemo(() => {
+          if (!activeLocation) return "";
+          if (activeLocation.mode === "zip") return `zip:${activeLocation.zip}`;
+          if (activeLocation.mode === "geo") return `geo:${activeLocation.lat}:${activeLocation.lon}`;
+          return "";
+        }, [activeLocation]);
 
         const [loading, setLoading] = useState(true);
         const [error, setError] = useState("");
@@ -614,7 +777,7 @@
         const [bgMode, setBgMode] = useState("day");
 
         // comparison: current vs other favorites
-        const [favoritesNow, setFavoritesNow] = useState({}); // zip -> {temp, humidity, tz, offset, localTime, label, city, state}
+        const [favoritesNow, setFavoritesNow] = useState({}); // favorite key -> {key, zip, temp, humidity, offset, localTime, label, city, state}
 
         // Search pill state (NEW)
         const [searchText, setSearchText] = useState("");
@@ -685,7 +848,7 @@
               if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error("Search location had invalid coordinates.");
             }
 
-            const label = loc.label ?? (loc.mode === "zip" ? ZIP_LABELS[loc.zip] ?? loc.zip : "Search");
+            const label = loc.label ?? (loc.mode === "zip" ? zipLabels[loc.zip] ?? loc.zip : "Search");
 
             setPlace({
               zip: zipForPlace ?? "",
@@ -838,7 +1001,7 @@
             setActiveLocation({
               mode: "zip",
               zip: z,
-              label: ZIP_LABELS[z] ?? z,
+              label: zipLabels[z] ?? z,
               lat: null,
               lon: null,
               city: null,
@@ -890,18 +1053,22 @@
           return () => document.removeEventListener("click", onDocClick);
         }, []);
 
-        // When favorites dropdown changes: switch to ZIP mode
+        // When favorites dropdown (or zip state) changes: update active location only if currently in ZIP mode
         useEffect(() => {
+          if (!zip) return;
+          if (activeLocation.mode !== "zip") return;
+
+          const zipLabels = Object.fromEntries(favorites.map((f) => [f.zip, f.label]));
           setActiveLocation({
             mode: "zip",
             zip,
-            label: ZIP_LABELS[zip] ?? zip,
+            label: zipLabels[zip] ?? zip,
             lat: null,
             lon: null,
             city: null,
             state: null,
           });
-        }, [zip]);
+        }, [zip, favorites, activeLocation.mode]);
 
         // Fetch when active location changes
         useEffect(() => {
@@ -1121,15 +1288,42 @@
         // Favorites label (for dropdown selection)
         const tzDisplay = prettyTimezoneName(tzName);
 
+        const comparableFavorites = useMemo(() => {
+          return favorites.filter((f) => {
+            if (!f?.mode) return false;
+            if (f.mode === "zip") return !!f.zip;
+            if (f.mode === "geo") {
+              return Number.isFinite(Number(f.lat)) && Number.isFinite(Number(f.lon));
+            }
+            return false;
+          });
+        }, [favorites]);
+
         // ---------- Favorites comparison fetch ----------
         async function refreshFavoritesNow() {
           try {
-            const baseZipList = ZIP_OPTIONS.slice();
+            if (!favoritesLoaded) return;
 
-            // fetch for each favorite zip: coords (zippopotam) + open-meteo current only
-            const tasks = baseZipList.map(async (z) => {
+            if (!comparableFavorites.length) {
+              setFavoritesNow({});
+              return;
+            }
+
+            // fetch for each favorite using either ZIP lookup or saved geo coordinates
+            const tasks = comparableFavorites.map(async (fav) => {
+              const key = makeFavoriteKey(fav);
               try {
-                const coords = await lookupZipToCoords(z);
+                let coords;
+                if (fav.mode === "zip") {
+                  coords = await lookupZipToCoords(fav.zip);
+                } else {
+                  coords = {
+                    lat: Number(fav.lat),
+                    lon: Number(fav.lon),
+                    city: fav.city || "—",
+                    state: fav.state || "",
+                  };
+                }
                 const params = new URLSearchParams({
                   latitude: String(coords.lat),
                   longitude: String(coords.lon),
@@ -1144,10 +1338,11 @@
                 const off = Number(wx?.utc_offset_seconds ?? 0);
                 const safeOff = Number.isFinite(off) ? off : 0;
                 return [
-                  z,
+                  key,
                   {
-                    zip: z,
-                    label: ZIP_LABELS[z] ?? z,
+                    key,
+                    zip: fav.mode === "zip" ? fav.zip : "",
+                    label: fav.label || favoriteDisplayLabel(fav),
                     city: coords.city,
                     state: coords.state,
                     temp: wx?.current?.temperature_2m ?? null,
@@ -1159,10 +1354,11 @@
                 ];
               } catch {
                 return [
-                  z,
+                  key,
                   {
-                    zip: z,
-                    label: ZIP_LABELS[z] ?? z,
+                    key,
+                    zip: fav.mode === "zip" ? fav.zip : "",
+                    label: fav.label || favoriteDisplayLabel(fav),
                     city: "—",
                     state: "",
                     temp: null,
@@ -1186,13 +1382,15 @@
 
         // refresh favorites now when main location changes (and occasionally)
         useEffect(() => {
+          if (!favoritesLoaded) return;
           refreshFavoritesNow();
-        }, [place?.lat, place?.lon]);
+        }, [favoritesLoaded, favorites, place?.lat, place?.lon]);
 
         useEffect(() => {
+          if (!favoritesLoaded) return;
           const id = setInterval(() => refreshFavoritesNow(), 10 * 60 * 1000);
           return () => clearInterval(id);
-        }, []);
+        }, [favoritesLoaded, favorites]);
 
         // Comparison model vs current active location
         const nightSkyAssessment = useMemo(() => {
@@ -1209,10 +1407,11 @@
 
           if (!favoritesNow || !Object.keys(favoritesNow).length) return [];
 
-          return ZIP_OPTIONS
-            .filter((z) => !(activeLocation.mode === "zip" && z === activeLocation.zip))
-            .map((z) => {
-              const other = favoritesNow[z];
+          return comparableFavorites
+            .map((fav) => makeFavoriteKey(fav))
+            .filter((key) => key && key !== selectedFavoriteKey)
+            .map((key) => {
+              const other = favoritesNow[key];
               const dt = Number(other?.temp) - Number(baseTemp);
               const dh = Number(other?.humidity) - Number(baseHum);
               const dmins = ((Number(other?.offset) || 0) - (Number(baseOff) || 0)) / 60;
@@ -1222,8 +1421,9 @@
               const safeDmins = Number.isFinite(dmins) ? dmins : null;
 
               return {
-                zip: z,
-                label: other?.label ?? z,
+                key,
+                zip: other?.zip ?? "",
+                label: other?.label ?? key,
                 city: other?.city ?? "",
                 state: other?.state ?? "",
                 otherTemp: other?.temp ?? null,
@@ -1234,7 +1434,20 @@
                 dMins: safeDmins,
               };
             });
-        }, [favoritesNow, derived?.currentTemp, derived?.currentHumidity, utcOffsetSeconds, activeLocation]);
+        }, [comparableFavorites, favoritesNow, derived?.currentTemp, derived?.currentHumidity, utcOffsetSeconds, selectedFavoriteKey]);
+
+        const comparisonEmptyMessage = useMemo(() => {
+          const comparableCount = comparableFavorites.length;
+
+          if (loading) return "Comparison will appear after current conditions load.";
+          if (!favoritesLoaded) return "Loading saved favorites...";
+          if (comparableCount === 0) return "Add a favorite to compare current conditions.";
+          if (comparableCount === 1 && makeFavoriteKey(comparableFavorites[0]) === selectedFavoriteKey) {
+            return "Add another favorite to compare against the current location.";
+          }
+          if (!Object.keys(favoritesNow || {}).length) return "Refreshing comparison data...";
+          return "No comparison rows are available for the current favorite selection.";
+        }, [loading, favoritesLoaded, comparableFavorites, selectedFavoriteKey, favoritesNow]);
 
         function diffClass(val) {
           if (val === null || val === undefined || !Number.isFinite(Number(val))) return "";
@@ -1261,7 +1474,7 @@
         const locationTitle =
           activeLocation.mode === "geo"
             ? (place?.label ?? "Search location")
-            : (ZIP_LABELS[zip] ?? zip);
+            : (zipLabels[zip] ?? zip);
 
         return (
           <div className={`${bgClass} min-h-screen transition-colors duration-700`}>
@@ -1287,17 +1500,115 @@
                       className={`rounded-2xl px-3 py-2 text-sm outline-none ring-1 ${
                         isDarkUI ? "bg-white/10 text-white ring-white/10" : "bg-slate-50 text-slate-900 ring-black/5"
                       }`}
-                      value={zip}
-                      onChange={(e) => setZip(e.target.value)}
-                      disabled={loading}
-                      title="Choose a saved ZIP favorite"
+                      value={selectedFavoriteKey}
+                      onChange={(e) => {
+                        const key = e.target.value;
+                        const fav = favoriteOptions.find((f) => f.key === key);
+                        if (!fav) return;
+
+                        if (fav.mode === "zip") {
+                          setZip(fav.zip);
+                          setActiveLocation({
+                            mode: "zip",
+                            zip: fav.zip,
+                            label: fav.label || fav.zip,
+                            lat: null,
+                            lon: null,
+                            city: null,
+                            state: null,
+                          });
+                        } else if (fav.mode === "geo") {
+                          setActiveLocation({
+                            mode: "geo",
+                            zip: "",
+                            label: fav.label || favoriteDisplayLabel(fav),
+                            lat: fav.lat,
+                            lon: fav.lon,
+                            city: fav.city || null,
+                            state: fav.state || null,
+                          });
+                        }
+                      }}
+                      disabled={loading || !favoritesLoaded}
+                      title="Choose a saved favorite"
                     >
-                      {ZIP_OPTIONS.map((z) => (
-                        <option key={z} value={z}>
-                          {(ZIP_LABELS[z] ?? z) + " — " + z}
+                      <option value="" disabled>
+                        Select favorite
+                      </option>
+                      {favoriteOptions.map((f) => (
+                        <option key={f.key} value={f.key}>
+                          {f.display}
                         </option>
                       ))}
                     </select>
+                    <button
+                      onClick={() => {
+                        if (!canSaveActive || isActiveFavorited) return;
+
+                        const defaultLabel = activeLocation.label || activeLocation.city || activeLocation.zip || "Favorite";
+                        const label = prompt("Name this favorite (e.g., Home, Office)", defaultLabel);
+                        if (!label || !label.trim()) return;
+
+                        const newFav = {
+                          mode: activeLocation.mode,
+                          zip: activeLocation.mode === "zip" ? activeLocation.zip : "",
+                          lat: activeLocation.mode === "geo" ? activeLocation.lat : null,
+                          lon: activeLocation.mode === "geo" ? activeLocation.lon : null,
+                          city: activeLocation.city || null,
+                          state: activeLocation.state || null,
+                          label: label.trim(),
+                        };
+                        setFavorites((prev) => [...prev, newFav]);
+
+                        // Keep new location selected
+                        if (activeLocation.mode === "zip") {
+                          setZip(activeLocation.zip);
+                          setActiveLocation({
+                            mode: "zip",
+                            zip: activeLocation.zip,
+                            label: label.trim(),
+                            lat: null,
+                            lon: null,
+                            city: null,
+                            state: null,
+                          });
+                          if (!defaultZip) setDefaultZip(activeLocation.zip);
+                        } else {
+                          setActiveLocation({
+                            ...activeLocation,
+                            label: label.trim(),
+                          });
+                        }
+                      }}
+                      className={`rounded-2xl min-w-[96px] px-3 py-2 text-sm font-semibold shadow hover:opacity-90 active:scale-[0.99] ${
+                        !canSaveActive
+                          ? "bg-gray-300 text-gray-700 cursor-not-allowed"
+                          : isActiveFavorited
+                          ? "bg-amber-500 text-white"
+                          : isDarkUI
+                          ? "bg-white text-black"
+                          : "bg-black text-white"
+                      }`}
+                      disabled={!canSaveActive || isActiveFavorited}
+                      title={
+                        !canSaveActive
+                          ? "Select a ZIP or place first"
+                          : isActiveFavorited
+                          ? "Already a favorite"
+                          : "Add this location to favorites"
+                      }
+                    >
+                      {isActiveFavorited ? "★ Favorited" : "☆ Save"}
+                    </button>
+                    <button
+                      onClick={() => setShowManage(true)}
+                      className={`rounded-2xl px-4 py-2 text-sm font-semibold shadow hover:opacity-90 active:scale-[0.99] ${
+                        isDarkUI ? "bg-white text-black" : "bg-black text-white"
+                      }`}
+                      disabled={!favoritesLoaded}
+                    >
+                      Manage
+                    </button>
                   </div>
 
                   {/* Search (NEW, replaces old) */}
@@ -1402,6 +1713,110 @@
                   </div>
                 </div>
               </div>
+
+              {showManage && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur">
+                  <div className={`rounded-3xl border p-6 shadow-[0_20px_50px_rgba(0,0,0,0.30)] max-w-md w-full mx-4 ${cardBg} ${borderSoft} ${cardText}`}>
+                    <div className="flex items-center justify-between mb-4">
+                      <div className={`text-lg font-semibold ${subText}`}>Manage Favorites</div>
+                      <button
+                        onClick={() => setShowManage(false)}
+                        className={`text-xl ${subText} hover:opacity-70`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="space-y-3">
+                      {favorites.map((f, idx) => (
+                        <div key={f.zip} className={`flex items-center gap-3 p-3 rounded-2xl ${isDarkUI ? "bg-white/5" : "bg-slate-50"}`}>
+                          <input
+                            type="text"
+                            value={f.label}
+                            onChange={(e) => {
+                              const newLabel = e.target.value;
+                              setFavorites(prev => prev.map((fav, i) => i === idx ? { ...fav, label: newLabel } : fav));
+                            }}
+                            className={`flex-1 px-2 py-1 text-sm rounded ${isDarkUI ? "bg-white/10 text-white" : "bg-white text-slate-900"}`}
+                          />
+                          <button
+                            onClick={() => {
+                              setDefaultZip(f.zip);
+                              setZip(f.zip);
+                            }}
+                            className={`px-2 py-1 text-xs rounded ${defaultZip === f.zip ? "bg-blue-500 text-white" : "bg-gray-300 text-gray-700"}`}
+                          >
+                            Default
+                          </button>
+                          <button
+                            onClick={() => {
+                              setFavorites((prev) => {
+                                const next = prev.filter((_, i) => i !== idx);
+                                if (defaultZip === f.zip) {
+                                  setDefaultZip(next[0]?.zip || null);
+                                }
+                                if (zip === f.zip) {
+                                  setZip(next[0]?.zip || null);
+                                }
+                                return next;
+                              });
+                            }}
+                            className="px-2 py-1 text-xs rounded bg-red-500 text-white"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        {canSaveActive && !isActiveFavorited ? (
+                          <button
+                            onClick={() => {
+                              const label = prompt("Name this favorite (e.g., Home, Office)", activeLocation.label || activeLocation.city || activeLocation.zip || "Favorite");
+                              if (!label || !label.trim()) return;
+
+                              const newFav = {
+                                mode: activeLocation.mode,
+                                zip: activeLocation.mode === "zip" ? activeLocation.zip : "",
+                                lat: activeLocation.mode === "geo" ? activeLocation.lat : null,
+                                lon: activeLocation.mode === "geo" ? activeLocation.lon : null,
+                                city: activeLocation.city || null,
+                                state: activeLocation.state || null,
+                                label: label.trim(),
+                              };
+
+                              setFavorites((prev) => [...prev, newFav]);
+                              if (activeLocation.mode === "zip") {
+                                setZip(activeLocation.zip);
+                                if (!defaultZip) setDefaultZip(activeLocation.zip);
+                              }
+                            }}
+                            className={`px-3 py-2 text-sm font-semibold rounded-2xl ${isDarkUI ? "bg-white text-black" : "bg-black text-white"}`}
+                          >
+                            ☆ Add Current Location to Favorites
+                          </button>
+                        ) : null}
+
+                        <button
+                          onClick={() => {
+                            const defaults = [
+                              { mode: "zip", zip: "84341", label: "Mom & Dad" },
+                              { mode: "zip", zip: "84321", label: "Christina/Katelyn" },
+                              { mode: "zip", zip: "32704", label: "Murriott" },
+                              { mode: "zip", zip: "84770", label: "St. George" },
+                            ];
+                            setFavorites(defaults);
+                            setDefaultZip("84341");
+                            setZip("84341");
+                          }}
+                          className="px-3 py-2 text-sm font-semibold rounded-2xl bg-blue-600 text-white"
+                        >
+                          Restore Default Favorites
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {error ? (
                 <div
@@ -1738,7 +2153,13 @@
                   <table className="w-full min-w-[1240px] border-separate border-spacing-y-2">
                     <thead>
                       <tr className={`text-left text-xs ${subText}`}>
-                        <th className="px-3 py-2">Day</th>
+                        <th
+                          className={`sticky left-0 z-20 px-3 py-2 shadow-[8px_0_16px_rgba(15,23,42,0.08)] ${
+                            isDarkUI ? "bg-slate-900/95" : "bg-white/95"
+                          } backdrop-blur`}
+                        >
+                          Day
+                        </th>
                         <th className="px-3 py-2">Icon</th>
                         <th className="px-3 py-2">Summary</th>
                         <th className="px-3 py-2">High</th>
@@ -1793,11 +2214,25 @@
                             onClick={() => setSelectedDate(d.date)}
                             title="Click to show hourly temps for this date"
                           >
-                            <td className="px-3 py-3 text-sm font-semibold">{formatDateLabel(d.date)}</td>
+                            <td
+                              className={`sticky left-0 z-10 px-3 py-3 text-sm font-semibold ${
+                                isDarkUI ? "bg-slate-950/95" : "bg-white/95"
+                              } backdrop-blur shadow-[8px_0_16px_rgba(15,23,42,0.08)]`}
+                            >
+                              {formatWeekdayLabel(d.date)}
+                            </td>
                             <td className="px-3 py-3 text-xl">
                               {weatherIcon(d.code)}{" "}
-                              {isMaxHigh ? <span title="Highest high" className="ml-2 text-[10px] font-bold tracking-wide text-rose-500 align-middle">HOTTEST</span> : null}
-                              {isMinLow ? <span title="Lowest low" className="ml-2 text-[10px] font-bold tracking-wide text-sky-500 align-middle">COLDEST</span> : null}
+                              {isMaxHigh ? (
+                                <span className="ml-2 inline-block align-middle leading-none">
+                                  <ThermometerBadge color="#f43f5e" label="Hottest day" level="high"></ThermometerBadge>
+                                </span>
+                              ) : null}
+                              {isMinLow ? (
+                                <span className="ml-1 inline-block align-middle leading-none">
+                                  <ThermometerBadge color="#0ea5e9" label="Coldest day" level="low"></ThermometerBadge>
+                                </span>
+                              ) : null}
                             </td>
                             <td className={`px-3 py-3 text-sm ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>
                               {weatherLabel(d.code)}
@@ -1846,13 +2281,13 @@
                       {(compareRows ?? []).map((r) => {
                         return (
                           <tr
-                            key={r.zip}
+                            key={r.key}
                             className={`rounded-2xl ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}
                           >
                             <td className="px-3 py-3 text-sm font-semibold">
                               {r.label}{" "}
                               <span className={`ml-2 text-xs ${subText}`}>
-                                {r.city}{r.state ? `, ${r.state}` : ""} ({r.zip})
+                                {r.city}{r.state ? `, ${r.state}` : ""}{r.zip ? ` (${r.zip})` : ""}
                               </span>
                             </td>
                             <td className="px-3 py-3 text-sm font-semibold">{formatTemp(r.otherTemp)}</td>
@@ -1873,7 +2308,7 @@
                       {(compareRows?.length ?? 0) === 0 ? (
                         <tr>
                           <td className={`px-3 py-4 text-sm ${subText}`} colSpan={7}>
-                            Comparison will appear after current conditions load.
+                            {comparisonEmptyMessage}
                           </td>
                         </tr>
                       ) : null}
