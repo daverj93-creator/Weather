@@ -2145,11 +2145,106 @@
                     <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>10-day forecast</div>
                     <div className={`mt-1 text-sm ${subText}`}>High • Low • Humidity • PoP • Precip • Wind (max)</div>
                   </div>
-                  <div className={`text-xs ${subText}`}>Tip: click a row • swipe on mobile</div>
+                  <div className={`hidden sm:block text-xs ${subText}`}>Tip: click a row • swipe on mobile</div>
                 </div>
 
-                <ScrollHint isDarkUI={isDarkUI} text="Swipe forecast table" />
-                <div className="mt-2 overflow-x-auto pb-2">
+                <div className="mt-4 space-y-3 sm:hidden">
+                  {(derived?.tenDay ?? []).map((d) => {
+                    const isSelected = d.date === selectedDate;
+
+                    const isMaxHigh =
+                      derived?.maxHigh !== null &&
+                      Number.isFinite(Number(d.high)) &&
+                      Number(d.high) === Number(derived.maxHigh);
+
+                    const isMinLow =
+                      derived?.minLow !== null &&
+                      Number.isFinite(Number(d.low)) &&
+                      Number(d.low) === Number(derived.minLow);
+
+                    const highlightClass =
+                      isMaxHigh && isMinLow
+                        ? isDarkUI
+                          ? "bg-purple-500/15 ring-purple-300/30"
+                          : "bg-purple-50 ring-purple-200"
+                        : isMaxHigh
+                        ? isDarkUI
+                          ? "bg-rose-500/15 ring-rose-300/30"
+                          : "bg-rose-50 ring-rose-200"
+                        : isMinLow
+                        ? isDarkUI
+                          ? "bg-sky-500/15 ring-sky-300/30"
+                          : "bg-sky-50 ring-sky-200"
+                        : isDarkUI
+                        ? "bg-white/5 ring-white/10"
+                        : "bg-slate-50 ring-black/5";
+
+                    const selectedRing = isSelected
+                      ? isDarkUI
+                        ? "ring-2 ring-white/25"
+                        : "ring-2 ring-black/10"
+                      : "ring-1";
+
+                    return (
+                      <button
+                        key={d.date}
+                        type="button"
+                        className={`block w-full rounded-3xl p-4 text-left shadow-[0_10px_30px_rgba(0,0,0,0.08)] ${highlightClass} ${selectedRing}`}
+                        onClick={() => setSelectedDate(d.date)}
+                        title="Tap to show hourly temps for this date"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <div className="text-lg font-semibold">{formatWeekdayLabel(d.date)}</div>
+                              {isMaxHigh ? (
+                                <ThermometerBadge color="#f43f5e" label="Hottest day" level="high"></ThermometerBadge>
+                              ) : null}
+                              {isMinLow ? (
+                                <ThermometerBadge color="#0ea5e9" label="Coldest day" level="low"></ThermometerBadge>
+                              ) : null}
+                            </div>
+                            <div className={`mt-1 text-sm ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>
+                              {weatherLabel(d.code)}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-3xl leading-none">{weatherIcon(d.code)}</div>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
+                          <div>
+                            <div className={`text-[11px] font-semibold uppercase tracking-wide ${subText}`}>High</div>
+                            <div className="mt-1 text-lg font-semibold">{formatTemp(d.high)}</div>
+                          </div>
+                          <div>
+                            <div className={`text-[11px] font-semibold uppercase tracking-wide ${subText}`}>Low</div>
+                            <div className="mt-1 text-lg font-semibold">{formatTemp(d.low)}</div>
+                          </div>
+                          <div>
+                            <div className={`text-[11px] font-semibold uppercase tracking-wide ${subText}`}>Humidity</div>
+                            <div className="mt-1 text-base font-semibold">{formatPct(d.humidMax)}</div>
+                          </div>
+                          <div>
+                            <div className={`text-[11px] font-semibold uppercase tracking-wide ${subText}`}>PoP</div>
+                            <div className="mt-1 text-base font-semibold">{formatPct(d.precipProb)}</div>
+                          </div>
+                        </div>
+
+                        <div className={`mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm ${subText}`}>
+                          <span>Precip {formatInches(d.precip)}</span>
+                          <span>Wind {formatMph(d.windMax)}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="hidden sm:block">
+                  <ScrollHint isDarkUI={isDarkUI} text="Swipe forecast table" />
+                </div>
+                <div className="mt-2 hidden overflow-x-auto pb-2 sm:block">
                   <table className="w-full min-w-[1240px] border-separate border-spacing-y-2">
                     <thead>
                       <tr className={`text-left text-xs ${subText}`}>
