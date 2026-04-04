@@ -1690,8 +1690,12 @@
               </div>
 
               {showManage && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur">
-                  <div className={`rounded-3xl border p-6 shadow-[0_20px_50px_rgba(0,0,0,0.30)] max-w-md w-full mx-4 ${cardBg} ${borderSoft} ${cardText}`}>
+                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60">
+                  <div
+                    className={`rounded-3xl border p-6 shadow-[0_20px_50px_rgba(0,0,0,0.30)] max-w-md w-full mx-4 ${
+                      isDarkUI ? "border-white/10 bg-slate-950 text-slate-100" : "border-black/5 bg-white text-slate-900"
+                    }`}
+                  >
                     <div className="flex items-center justify-between mb-4">
                       <div className={`text-lg font-semibold ${subText}`}>Manage Favorites</div>
                       <button
