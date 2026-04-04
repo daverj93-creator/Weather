@@ -586,6 +586,7 @@
         nowIndex,
         formatTooltip,
         nowLineColor,
+        minY,
       }) {
         const canvasRef = useRef(null);
         const chartRef = useRef(null);
@@ -640,7 +641,11 @@
               },
               scales: {
                 x: { ticks: { color: axisColor, maxTicksLimit: 10 }, grid: { color: gridColor } },
-                y: { ticks: { color: axisColor }, grid: { color: gridColor } },
+                y: {
+                  min: Number.isFinite(minY) ? minY : undefined,
+                  ticks: { color: axisColor },
+                  grid: { color: gridColor },
+                },
               },
             },
           });
@@ -651,7 +656,7 @@
               chartRef.current = null;
             }
           };
-        }, [labels?.join(","), values?.join(","), title, chartTitleDate, isDarkUI, nowIndex]);
+        }, [labels?.join(","), values?.join(","), title, chartTitleDate, isDarkUI, nowIndex, minY]);
 
         return <canvas ref={canvasRef}></canvas>;
       }
@@ -2024,6 +2029,7 @@
                         isDarkUI={isDarkUI}
                         nowIndex={nowIndex}
                         formatTooltip={(y) => ` ${Math.round(y)}%`}
+                        minY={0}
                       />
                     </div>
 
@@ -2036,6 +2042,7 @@
                         isDarkUI={isDarkUI}
                         nowIndex={nowIndex}
                         formatTooltip={(y) => ` ${Math.round(y)} mph`}
+                        minY={0}
                       />
                     </div>
                   </div>
