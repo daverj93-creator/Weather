@@ -752,11 +752,11 @@
         }, [favorites]);
 
         const selectedFavoriteKey = useMemo(() => {
-          if (!activeLocation) return "";
+          if (!activeLocation || !isActiveFavorited) return "";
           if (activeLocation.mode === "zip") return `zip:${activeLocation.zip}`;
           if (activeLocation.mode === "geo") return `geo:${activeLocation.lat}:${activeLocation.lon}`;
           return "";
-        }, [activeLocation]);
+        }, [activeLocation, isActiveFavorited]);
 
         const [loading, setLoading] = useState(true);
         const [error, setError] = useState("");
@@ -1496,9 +1496,10 @@
                   <div
                     className={`rounded-3xl border px-3 py-2 shadow-[0_10px_30px_rgba(0,0,0,0.10)] ${cardBg} ${borderSoft}`}
                   >
-                    <label className={`mr-2 text-xs font-semibold uppercase tracking-wide ${subText}`}>Favorites</label>
+                    <div className="flex items-center gap-2 whitespace-nowrap">
+                    <label className={`shrink-0 text-xs font-semibold uppercase tracking-wide ${subText}`}>Favorites</label>
                     <select
-                      className={`rounded-2xl px-3 py-2 text-sm outline-none ring-1 ${
+                      className={`min-w-0 flex-1 rounded-2xl px-3 py-2 text-sm outline-none ring-1 ${
                         isDarkUI ? "bg-white/10 text-white ring-white/10" : "bg-slate-50 text-slate-900 ring-black/5"
                       }`}
                       value={selectedFavoriteKey}
@@ -1534,7 +1535,7 @@
                       title="Choose a saved favorite"
                     >
                       <option value="" disabled>
-                        Select favorite
+                        {isActiveFavorited ? "Select favorite" : "Viewing unsaved location"}
                       </option>
                       {favoriteOptions.map((f) => (
                         <option key={f.key} value={f.key}>
@@ -1543,73 +1544,29 @@
                       ))}
                     </select>
                     <button
-                      onClick={() => {
-                        if (!canSaveActive || isActiveFavorited) return;
-
-                        const defaultLabel = activeLocation.label || activeLocation.city || activeLocation.zip || "Favorite";
-                        const label = prompt("Name this favorite (e.g., Home, Office)", defaultLabel);
-                        if (!label || !label.trim()) return;
-
-                        const newFav = {
-                          mode: activeLocation.mode,
-                          zip: activeLocation.mode === "zip" ? activeLocation.zip : "",
-                          lat: activeLocation.mode === "geo" ? activeLocation.lat : null,
-                          lon: activeLocation.mode === "geo" ? activeLocation.lon : null,
-                          city: activeLocation.city || null,
-                          state: activeLocation.state || null,
-                          label: label.trim(),
-                        };
-                        setFavorites((prev) => [...prev, newFav]);
-
-                        // Keep new location selected
-                        if (activeLocation.mode === "zip") {
-                          setZip(activeLocation.zip);
-                          setActiveLocation({
-                            mode: "zip",
-                            zip: activeLocation.zip,
-                            label: label.trim(),
-                            lat: null,
-                            lon: null,
-                            city: null,
-                            state: null,
-                          });
-                          if (!defaultZip) setDefaultZip(activeLocation.zip);
-                        } else {
-                          setActiveLocation({
-                            ...activeLocation,
-                            label: label.trim(),
-                          });
-                        }
-                      }}
-                      className={`rounded-2xl min-w-[96px] px-3 py-2 text-sm font-semibold shadow hover:opacity-90 active:scale-[0.99] ${
-                        !canSaveActive
-                          ? "bg-gray-300 text-gray-700 cursor-not-allowed"
-                          : isActiveFavorited
-                          ? "bg-amber-500 text-white"
-                          : isDarkUI
-                          ? "bg-white text-black"
-                          : "bg-black text-white"
-                      }`}
-                      disabled={!canSaveActive || isActiveFavorited}
-                      title={
-                        !canSaveActive
-                          ? "Select a ZIP or place first"
-                          : isActiveFavorited
-                          ? "Already a favorite"
-                          : "Add this location to favorites"
-                      }
-                    >
-                      {isActiveFavorited ? "★ Favorited" : "☆ Save"}
-                    </button>
-                    <button
                       onClick={() => setShowManage(true)}
-                      className={`rounded-2xl px-4 py-2 text-sm font-semibold shadow hover:opacity-90 active:scale-[0.99] ${
-                        isDarkUI ? "bg-white text-black" : "bg-black text-white"
+                      className={`flex h-9 w-9 items-center justify-center rounded-full shadow hover:opacity-90 active:scale-[0.99] ${
+                        isDarkUI ? "bg-slate-200/20 text-white ring-1 ring-white/15" : "bg-slate-200 text-slate-900 ring-1 ring-black/5"
                       }`}
                       disabled={!favoritesLoaded}
+                      title="Manage favorites"
+                      aria-label="Manage favorites"
                     >
-                      Manage
+                      <svg
+                        className="h-4 w-4"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.49.68.83 1.21 1H21a2 2 0 1 1 0 4h-.39c-.53.17-1.01.51-1.21 1Z"></path>
+                      </svg>
                     </button>
+                    </div>
                   </div>
 
                   {/* Search (NEW, replaces old) */}
@@ -1701,17 +1658,27 @@
                   {/* Refresh */}
                   <button
                     onClick={() => fetchAllForLocation(activeLocation)}
-                    className={`rounded-2xl px-4 py-3 text-sm font-semibold shadow hover:opacity-90 active:scale-[0.99] disabled:opacity-60 ${
-                      isDarkUI ? "bg-white text-black" : "bg-black text-white"
+                    className={`flex h-10 w-10 items-center justify-center rounded-full shadow hover:opacity-90 active:scale-[0.99] disabled:opacity-60 ${
+                      isDarkUI ? "bg-[#7AC943] text-slate-950" : "bg-[#7AC943] text-slate-950"
                     }`}
                     disabled={loading}
+                    title={loading ? "Refreshing weather" : "Refresh weather"}
+                    aria-label={loading ? "Refreshing weather" : "Refresh weather"}
                   >
-                    {loading ? "Refreshing…" : "Refresh"}
+                    <svg
+                      className={`h-4 w-4 ${loading ? "animate-spin" : ""}`}
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                      <path d="M21 3v6h-6" />
+                    </svg>
                   </button>
-
-                  <div className={`text-xs ${subText}`}>
-                    {lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : ""}
-                  </div>
                 </div>
               </div>
 
@@ -1833,7 +1800,79 @@
               <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
                 {/* LEFT */}
                 <div className={`rounded-3xl border p-6 ${cardBg} ${borderSoft} shadow-[0_10px_30px_rgba(0,0,0,0.10)] ${cardText}`}>
-                  <div className={`text-sm font-semibold tracking-wide ${subText}`}>Location</div>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold tracking-wide ${subText}`}>
+                      <span>Location</span>
+                      <span className={`text-xs font-medium normal-case tracking-normal ${subText}`}>
+                        {lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : ""}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (!canSaveActive || isActiveFavorited) return;
+
+                        const defaultLabel = activeLocation.label || activeLocation.city || activeLocation.zip || "Favorite";
+                        const label = prompt("Name this favorite (e.g., Home, Office)", defaultLabel);
+                        if (!label || !label.trim()) return;
+
+                        const newFav = {
+                          mode: activeLocation.mode,
+                          zip: activeLocation.mode === "zip" ? activeLocation.zip : "",
+                          lat: activeLocation.mode === "geo" ? activeLocation.lat : null,
+                          lon: activeLocation.mode === "geo" ? activeLocation.lon : null,
+                          city: activeLocation.city || null,
+                          state: activeLocation.state || null,
+                          label: label.trim(),
+                        };
+                        setFavorites((prev) => [...prev, newFav]);
+
+                        if (activeLocation.mode === "zip") {
+                          setZip(activeLocation.zip);
+                          setActiveLocation({
+                            mode: "zip",
+                            zip: activeLocation.zip,
+                            label: label.trim(),
+                            lat: null,
+                            lon: null,
+                            city: null,
+                            state: null,
+                          });
+                          if (!defaultZip) setDefaultZip(activeLocation.zip);
+                        } else {
+                          setActiveLocation({
+                            ...activeLocation,
+                            label: label.trim(),
+                          });
+                        }
+                      }}
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-base shadow transition hover:opacity-90 active:scale-[0.99] ${
+                        !canSaveActive
+                          ? "cursor-not-allowed bg-gray-300 text-gray-700"
+                          : isActiveFavorited
+                          ? "bg-amber-500 text-white"
+                          : isDarkUI
+                          ? "bg-white/10 text-white ring-1 ring-white/15"
+                          : "bg-slate-100 text-slate-900 ring-1 ring-black/5"
+                      }`}
+                      disabled={!canSaveActive || isActiveFavorited}
+                      title={
+                        !canSaveActive
+                          ? "Select a ZIP or place first"
+                          : isActiveFavorited
+                          ? "Favorited"
+                          : "Add this location to favorites"
+                      }
+                      aria-label={
+                        !canSaveActive
+                          ? "Select a ZIP or place first"
+                          : isActiveFavorited
+                          ? "Favorited"
+                          : "Add this location to favorites"
+                      }
+                    >
+                      <span aria-hidden="true">{isActiveFavorited ? "★" : "☆"}</span>
+                    </button>
+                  </div>
                   <div className="mt-2 text-lg font-semibold">
                     {locationTitle}
                     <span className={`${isDarkUI ? "text-slate-300" : "text-slate-500"} font-normal`}> • </span>
