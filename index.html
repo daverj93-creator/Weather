@@ -3005,6 +3005,7 @@
 
 	                        const isExpanded = expandedForecastDate === d.date;
 	                        const rows = isExpanded ? expandedHourlyRows : [];
+	                        const condition = weatherCondition(d.code, d.low);
 
 	                        return (
 	                          <React.Fragment key={d.date}>
