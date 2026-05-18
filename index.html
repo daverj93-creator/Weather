@@ -1,6 +1,15 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-R127XKR5EV"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-R127XKR5EV');
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#CFE9FF" />
@@ -32,6 +41,10 @@
     <!-- Astronomy Engine (browser build) -->
     <script src="https://cdn.jsdelivr.net/npm/astronomy-engine@2.1.19/astronomy.browser.min.js"></script>
 
+    <!-- Leaflet for click-to-load radar -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
     <style>
       html,
       body {
@@ -51,6 +64,7 @@
 
       const GEO_API = "https://geocoding-api.open-meteo.com/v1/search";
       const ZIP_API = "https://api.zippopotam.us/us/";
+      const RAINVIEWER_MAX_ZOOM = 7;
 
       function formatTemp(n) {
         if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
@@ -128,6 +142,12 @@
           return fav.city ? `${fav.city}${fav.state ? `, ${fav.state}` : ""}` : `Geo ${fav.lat},${fav.lon}`;
         }
         return "Favorite";
+      }
+
+      function compactCurrentLocationLabel(place, activeLocation) {
+        if (activeLocation?.source !== "current") return null;
+        const city = place?.city && place.city !== "—" ? place.city : "Current Location";
+        return { title: city, detail: "Current Location" };
       }
 
       function ThermometerBadge({ color = "#ef4444", label, level = "high" }) {
@@ -240,6 +260,20 @@
           99: "Thunderstorm + hail",
         };
         return map[c] ?? `Code ${c}`;
+      }
+
+      function weatherCondition(code, tempF) {
+        const c = Number(code);
+        const temp = Number(tempF);
+        const label = weatherLabel(code);
+        const icon = weatherIcon(code);
+        const isSnow = [71, 73, 75, 77, 85, 86].includes(c);
+
+        if (!isSnow || !Number.isFinite(temp)) return { label, icon };
+
+        if (temp >= 40) return { label: "Rain / snow possible", icon: "🌦️" };
+        if (temp >= 33) return { label: "Rain / snow mix", icon: "🌨️" };
+        return { label, icon };
       }
 
       function pick24hWindow(hourlyTimes) {
@@ -577,6 +611,251 @@
         return { score, label, detail };
       }
 
+      function RadarIcon({ className = "h-4 w-4" }) {
+        return (
+          <svg
+            className={className}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 12h.01" />
+            <path d="M16.24 7.76a6 6 0 0 1 0 8.49" />
+            <path d="M7.76 16.24a6 6 0 0 1 0-8.49" />
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+            <path d="M4.93 19.07a10 10 0 0 1 0-14.14" />
+          </svg>
+        );
+      }
+
+      function RadarTileIcon({ className = "h-8 w-8" }) {
+        return (
+          <span
+            className={`relative inline-flex items-center justify-center overflow-hidden rounded-full bg-black shadow-inner ${className}`}
+            aria-hidden="true"
+          >
+            <span className="absolute h-[76%] w-[76%] rounded-full bg-[#1fbf38] shadow-[inset_0_0_14px_rgba(255,255,255,0.30),inset_0_0_16px_rgba(0,0,0,0.55)]"></span>
+            <span className="absolute h-[48%] w-[48%] rounded-full border border-lime-200/35"></span>
+            <span className="absolute h-[18%] w-[18%] rounded-full border border-lime-100/45"></span>
+            <span className="absolute left-1/2 top-1/2 h-[3px] w-[34%] origin-left -translate-y-1/2 rotate-[-45deg] rounded-full bg-lime-100 shadow-[0_0_10px_rgba(187,247,208,0.9)]"></span>
+            <span className="absolute h-[11%] w-[11%] rounded-full bg-lime-200/80"></span>
+          </span>
+        );
+      }
+
+      function LocationIcon({ className = "h-4 w-4" }) {
+        return (
+          <svg
+            className={className}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 2v4" />
+            <path d="M12 18v4" />
+            <path d="M2 12h4" />
+            <path d="M18 12h4" />
+            <circle cx="12" cy="12" r="4" />
+            <circle cx="12" cy="12" r="8" />
+          </svg>
+        );
+      }
+
+      function RadarOverlay({ open, onClose, lat, lon, locationName, isDarkUI }) {
+        const mapEl = useRef(null);
+        const mapRef = useRef(null);
+        const radarLayerRef = useRef(null);
+        const timerRef = useRef(null);
+        const [frames, setFrames] = useState([]);
+        const [frameIdx, setFrameIdx] = useState(0);
+        const [playing, setPlaying] = useState(false);
+        const [radarError, setRadarError] = useState("");
+        const [loadingRadar, setLoadingRadar] = useState(false);
+
+        const currentFrame = frames[frameIdx] ?? null;
+
+        useEffect(() => {
+          if (!open) return;
+          let cancelled = false;
+
+          async function loadFrames() {
+            setLoadingRadar(true);
+            setRadarError("");
+            try {
+              const res = await fetch("https://api.rainviewer.com/public/weather-maps.json");
+              if (!res.ok) throw new Error(`Radar feed failed (${res.status}).`);
+              const json = await res.json();
+              const past = json?.radar?.past ?? [];
+              const nextFrames = past.map((frame) => ({
+                ...frame,
+                tileUrl: `${json.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`,
+              }));
+              if (!nextFrames.length) throw new Error("No radar frames are available right now.");
+              if (!cancelled) {
+                setFrames(nextFrames);
+                setFrameIdx(nextFrames.length - 1);
+              }
+            } catch (e) {
+              if (!cancelled) setRadarError(e?.message ?? "Radar is unavailable right now.");
+            } finally {
+              if (!cancelled) setLoadingRadar(false);
+            }
+          }
+
+          loadFrames();
+          return () => {
+            cancelled = true;
+          };
+        }, [open]);
+
+        useEffect(() => {
+          if (!open || !mapEl.current || !window.L || !Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) return;
+
+          const map = window.L.map(mapEl.current, {
+            zoomControl: true,
+            attributionControl: true,
+            minZoom: 4,
+            maxZoom: RAINVIEWER_MAX_ZOOM,
+          }).setView([Number(lat), Number(lon)], RAINVIEWER_MAX_ZOOM);
+
+          window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            maxZoom: RAINVIEWER_MAX_ZOOM,
+            attribution: "&copy; OpenStreetMap",
+          }).addTo(map);
+
+          window.L.marker([Number(lat), Number(lon)]).addTo(map);
+          mapRef.current = map;
+
+          setTimeout(() => map.invalidateSize(), 80);
+
+          return () => {
+            if (radarLayerRef.current) {
+              radarLayerRef.current.remove();
+              radarLayerRef.current = null;
+            }
+            map.remove();
+            mapRef.current = null;
+          };
+        }, [open, lat, lon]);
+
+        useEffect(() => {
+          if (!open || !mapRef.current || !currentFrame?.tileUrl || !window.L) return;
+          if (radarLayerRef.current) radarLayerRef.current.remove();
+          radarLayerRef.current = window.L.tileLayer(currentFrame.tileUrl, {
+            opacity: 0.72,
+            zIndex: 20,
+            maxZoom: RAINVIEWER_MAX_ZOOM,
+            maxNativeZoom: RAINVIEWER_MAX_ZOOM,
+            attribution: "Radar: RainViewer",
+          }).addTo(mapRef.current);
+        }, [open, currentFrame?.tileUrl]);
+
+        useEffect(() => {
+          if (!open || !playing || frames.length <= 1) return;
+          timerRef.current = setInterval(() => {
+            setFrameIdx((idx) => (idx + 1) % frames.length);
+          }, 700);
+          return () => {
+            if (timerRef.current) clearInterval(timerRef.current);
+            timerRef.current = null;
+          };
+        }, [open, playing, frames.length]);
+
+        useEffect(() => {
+          if (!open) setPlaying(false);
+        }, [open]);
+
+        if (!open) return null;
+
+        const frameTime = currentFrame?.time
+          ? new Date(currentFrame.time * 1000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+          : "";
+
+        return (
+          <div className="fixed inset-0 z-[160] flex items-end justify-center bg-black/55 sm:items-center">
+            <div
+              className={`flex h-[72vh] max-h-[620px] w-full flex-col rounded-t-3xl border shadow-[0_25px_80px_rgba(0,0,0,0.35)] sm:h-[560px] sm:w-[min(860px,calc(100vw-32px))] sm:rounded-3xl ${
+                isDarkUI ? "border-white/10 bg-slate-950 text-slate-100" : "border-black/10 bg-white text-slate-900"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
+                <div className="flex min-w-0 items-center gap-3">
+                  <RadarIcon className="h-5 w-5 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold">{locationName || "Current radar"}</div>
+                    <div className={`text-xs ${isDarkUI ? "text-slate-300" : "text-slate-500"}`}>
+                      {loadingRadar ? "Loading radar..." : radarError || (frameTime ? `Observed ${frameTime}` : "Observed radar")}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xl ${
+                    isDarkUI ? "bg-white/10 hover:bg-white/15" : "bg-slate-100 hover:bg-slate-200"
+                  }`}
+                  aria-label="Close radar"
+                  title="Close radar"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="relative min-h-0 flex-1">
+                <div ref={mapEl} className="h-full w-full"></div>
+                {radarError ? (
+                  <div className="absolute inset-x-4 top-4 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-800 shadow">
+                    {radarError}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className={`flex flex-wrap items-center gap-3 border-t px-4 py-3 sm:px-5 ${isDarkUI ? "border-white/10" : "border-black/10"}`}>
+                <button
+                  type="button"
+                  onClick={() => setPlaying((v) => !v)}
+                  disabled={frames.length <= 1}
+                  className={`rounded-full px-4 py-2 text-sm font-semibold disabled:opacity-50 ${
+                    isDarkUI ? "bg-white text-black" : "bg-slate-900 text-white"
+                  }`}
+                >
+                  {playing ? "Pause" : "Play"}
+                </button>
+                <input
+                  type="range"
+                  min="0"
+                  max={Math.max(0, frames.length - 1)}
+                  value={frameIdx}
+                  onChange={(e) => {
+                    setPlaying(false);
+                    setFrameIdx(Number(e.target.value));
+                  }}
+                  disabled={!frames.length}
+                  className="min-w-[180px] flex-1"
+                  aria-label="Radar timeline"
+                />
+                <a
+                  href="https://www.rainviewer.com/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`text-xs ${isDarkUI ? "text-slate-300" : "text-slate-500"}`}
+                >
+                  RainViewer
+                </a>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
       function HourlyLineChart({
         title,
         labels,
@@ -586,6 +865,7 @@
         nowIndex,
         formatTooltip,
         nowLineColor,
+        minY,
       }) {
         const canvasRef = useRef(null);
         const chartRef = useRef(null);
@@ -640,7 +920,11 @@
               },
               scales: {
                 x: { ticks: { color: axisColor, maxTicksLimit: 10 }, grid: { color: gridColor } },
-                y: { ticks: { color: axisColor }, grid: { color: gridColor } },
+                y: {
+                  min: Number.isFinite(minY) ? minY : undefined,
+                  ticks: { color: axisColor },
+                  grid: { color: gridColor },
+                },
               },
             },
           });
@@ -651,17 +935,25 @@
               chartRef.current = null;
             }
           };
-        }, [labels?.join(","), values?.join(","), title, chartTitleDate, isDarkUI, nowIndex]);
+        }, [labels?.join(","), values?.join(","), title, chartTitleDate, isDarkUI, nowIndex, minY]);
 
         return <canvas ref={canvasRef}></canvas>;
       }
 
       function WeatherApp() {
+        const USE_CURRENT_LOCATION_KEY = "weatherhop-use-current-location";
+
         // Favorites state (persistent)
         const [favorites, setFavorites] = useState([]);
         const [defaultZip, setDefaultZip] = useState(null);
         const [favoritesLoaded, setFavoritesLoaded] = useState(false);
         const [showManage, setShowManage] = useState(false);
+        const [useCurrentLocationDefault, setUseCurrentLocationDefault] = useState(
+          () => localStorage.getItem(USE_CURRENT_LOCATION_KEY) === "true"
+        );
+        const [locationStatus, setLocationStatus] = useState("");
+        const [requestingLocation, setRequestingLocation] = useState(false);
+        const [showRadar, setShowRadar] = useState(false);
 
         // Favorites selection (kept)
         const [zip, setZip] = useState(null);
@@ -680,15 +972,8 @@
               console.warn('Failed to load favorites', e);
             }
           } else {
-            // Seed with defaults
-            const defaults = [
-              { mode: "zip", zip: "84341", label: "Mom & Dad" },
-              { mode: "zip", zip: "84321", label: "Christina/Katelyn" },
-              { mode: "zip", zip: "32704", label: "Murriott" },
-              { mode: "zip", zip: "84770", label: "St. George" }
-            ];
-            setFavorites(defaults);
-            setDefaultZip("84341");
+            setFavorites([]);
+            setDefaultZip(null);
           }
           setFavoritesLoaded(true);
         }, []);
@@ -700,23 +985,8 @@
           }
         }, [favorites, defaultZip, favoritesLoaded]);
 
-        // Set initial zip when loaded
-        useEffect(() => {
-          if (favoritesLoaded && zip === null) {
-            setZip(defaultZip || favorites[0]?.zip || "84341");
-          }
-        }, [favoritesLoaded, defaultZip, favorites, zip]);
-
         // Active location: either a favorite ZIP, or a searched geo location
-        const [activeLocation, setActiveLocation] = useState({
-          mode: "zip", // "zip" | "geo"
-          zip: "84341",
-          label: "Mom & Dad",
-          lat: null,
-          lon: null,
-          city: null,
-          state: null,
-        });
+        const [activeLocation, setActiveLocation] = useState(null);
 
         const isActiveFavorited = useMemo(() => {
           if (!activeLocation || !favoritesLoaded) return false;
@@ -765,6 +1035,7 @@
 
         const [lastUpdated, setLastUpdated] = useState(null);
         const [selectedDate, setSelectedDate] = useState(null);
+        const [expandedForecastDate, setExpandedForecastDate] = useState(null);
         const [mobileForecastCompact, setMobileForecastCompact] = useState(true);
         const [mobileComparisonCompact, setMobileComparisonCompact] = useState(true);
 
@@ -818,7 +1089,7 @@
             forecast_days: "10",
             daily:
               "temperature_2m_max,temperature_2m_min,relative_humidity_2m_max,precipitation_sum,precipitation_probability_max,windspeed_10m_max,winddirection_10m_dominant,weathercode,sunrise,sunset",
-            hourly: "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation_probability,wind_speed_10m",
+            hourly: "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation_probability,wind_speed_10m,weathercode",
             current: "temperature_2m,relative_humidity_2m,wind_speed_10m",
           });
 
@@ -827,7 +1098,31 @@
           return await wxRes.json();
         }
 
+        async function reverseGeocodeCurrentLocation({ lat, lon }) {
+          const params = new URLSearchParams({
+            latitude: String(lat),
+            longitude: String(lon),
+            localityLanguage: "en",
+          });
+
+          try {
+            const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?${params.toString()}`);
+            if (!res.ok) throw new Error("Reverse geocode failed.");
+            const json = await res.json();
+            const city = json.city || json.locality || json.principalSubdivision || json.countryName || "Current Location";
+            const state = json.principalSubdivision || "";
+            return { city, state };
+          } catch (e) {
+            console.warn("Reverse geocode failed", e);
+            return { city: "Current Location", state: "" };
+          }
+        }
+
         async function fetchAllForLocation(loc) {
+          if (!loc) {
+            setLoading(false);
+            return;
+          }
           setLoading(true);
           try {
             let lat, lon, city, state, zipForPlace;
@@ -939,6 +1234,100 @@
           } finally {
             setLoading(false);
           }
+        }
+
+        function fallbackToSavedLocation() {
+          const defaultFavorite = defaultZip ? favorites.find((f) => f.mode === "zip" && f.zip === defaultZip) : null;
+          const firstFavorite = favorites.find((f) => f?.mode === "zip" || f?.mode === "geo") ?? null;
+          const fav = defaultFavorite ?? firstFavorite;
+
+          if (!fav) {
+            setActiveLocation(null);
+            setZip(null);
+            setLoading(false);
+            return;
+          }
+
+          if (fav.mode === "zip") {
+            setZip(fav.zip);
+            setActiveLocation({
+              mode: "zip",
+              zip: fav.zip,
+              label: fav.label || fav.zip,
+              lat: null,
+              lon: null,
+              city: null,
+              state: null,
+            });
+            return;
+          }
+
+          setZip(null);
+          setActiveLocation({
+            mode: "geo",
+            zip: "",
+            label: fav.label || favoriteDisplayLabel(fav),
+            lat: fav.lat,
+            lon: fav.lon,
+            city: fav.city || null,
+            state: fav.state || null,
+          });
+        }
+
+        function useBrowserLocation({ persist = true, fallback = false } = {}) {
+          if (!navigator.geolocation) {
+            setLocationStatus("Location is not available in this browser.");
+            if (fallback) fallbackToSavedLocation();
+            return;
+          }
+
+          setRequestingLocation(true);
+          setLocationStatus("Finding your location...");
+
+          navigator.geolocation.getCurrentPosition(
+            async (position) => {
+              const lat = position.coords.latitude;
+              const lon = position.coords.longitude;
+              const locationName = await reverseGeocodeCurrentLocation({ lat, lon });
+              const cityLabel = locationName.city || "Current Location";
+              const nextLocation = {
+                mode: "geo",
+                source: "current",
+                zip: "",
+                label: cityLabel,
+                lat,
+                lon,
+                city: cityLabel,
+                state: locationName.state || "",
+              };
+
+              if (persist) {
+                localStorage.setItem(USE_CURRENT_LOCATION_KEY, "true");
+                setUseCurrentLocationDefault(true);
+              }
+
+              setZip(null);
+              setActiveLocation(nextLocation);
+              setLocationStatus("Using current location.");
+              setRequestingLocation(false);
+            },
+            (error) => {
+              console.warn("Location permission denied or unavailable:", error);
+              if (persist) {
+                localStorage.removeItem(USE_CURRENT_LOCATION_KEY);
+                setUseCurrentLocationDefault(false);
+              }
+              setLocationStatus("Current location is unavailable.");
+              setRequestingLocation(false);
+              if (fallback) fallbackToSavedLocation();
+              else setLoading(false);
+            },
+            {
+              enableHighAccuracy: false,
+              timeout: 8000,
+              maximumAge: 10 * 60 * 1000,
+            }
+          );
         }
 
         // ---------- Search (Open-Meteo Geocoding) ----------
@@ -1058,10 +1447,22 @@
           if (showManage) setSearchOpen(false);
         }, [showManage]);
 
+        // Startup selection: current location default, then saved favorite, then empty/search state.
+        useEffect(() => {
+          if (!favoritesLoaded || activeLocation) return;
+
+          if (useCurrentLocationDefault) {
+            useBrowserLocation({ persist: false, fallback: true });
+            return;
+          }
+
+          fallbackToSavedLocation();
+        }, [favoritesLoaded, useCurrentLocationDefault, activeLocation]);
+
         // When favorites dropdown (or zip state) changes: update active location only if currently in ZIP mode
         useEffect(() => {
           if (!zip) return;
-          if (activeLocation.mode !== "zip") return;
+          if (activeLocation?.mode !== "zip") return;
 
           const zipLabels = Object.fromEntries(favorites.map((f) => [f.zip, f.label]));
           setActiveLocation({
@@ -1073,12 +1474,17 @@
             city: null,
             state: null,
           });
-        }, [zip, favorites, activeLocation.mode]);
+        }, [zip, favorites, activeLocation?.mode]);
 
         // Fetch when active location changes
         useEffect(() => {
+          if (!favoritesLoaded) return;
+          if (!activeLocation) {
+            setLoading(false);
+            return;
+          }
           fetchAllForLocation(activeLocation);
-        }, [activeLocation.mode, activeLocation.zip, activeLocation.lat, activeLocation.lon, activeLocation.label]);
+        }, [favoritesLoaded, activeLocation?.mode, activeLocation?.zip, activeLocation?.lat, activeLocation?.lon, activeLocation?.label]);
 
         // Refresh tick
         useEffect(() => {
@@ -1095,6 +1501,7 @@
           const todayHigh = daily?.temperature_2m_max?.[0];
           const todayLow = daily?.temperature_2m_min?.[0];
           const todayCode = daily?.weathercode?.[0];
+          const todayCondition = weatherCondition(todayCode, data?.current?.temperature_2m ?? todayLow ?? todayHigh);
 
           const times = hourly?.time ?? [];
           const hum = hourly?.relative_humidity_2m ?? [];
@@ -1171,6 +1578,7 @@
             todayHigh,
             todayLow,
             todayCode,
+            todayCondition,
             humidityHigh24,
             dewPointLow24,
             tenDay,
@@ -1266,6 +1674,34 @@
           const { days, idx } = canPrevNext;
           if (idx >= 0 && idx < days.length - 1) setSelectedDate(days[idx + 1]);
         }
+
+        function selectForecastDate(date) {
+          setSelectedDate(date);
+          setExpandedForecastDate((current) => (current === date ? null : date));
+        }
+
+        const expandedHourlyRows = useMemo(() => {
+          if (!expandedForecastDate || !data?.hourly?.time?.length) return [];
+
+          const times = data.hourly.time ?? [];
+          const temps = data.hourly.temperature_2m ?? [];
+          const precip = data.hourly.precipitation_probability ?? [];
+          const wind = data.hourly.wind_speed_10m ?? [];
+          const codes = data.hourly.weathercode ?? [];
+
+          const rows = [];
+          for (let i = 0; i < times.length; i++) {
+            if (!String(times[i]).startsWith(expandedForecastDate)) continue;
+            rows.push({
+              time: formatHourLabel(times[i]),
+              temp: temps[i],
+              precip: precip[i],
+              wind: wind[i],
+              code: codes[i],
+            });
+          }
+          return rows;
+        }, [expandedForecastDate, data]);
 
         const sunArc = useMemo(() => {
           if (!derived?.selectedDayData) return null;
@@ -1477,9 +1913,12 @@
         }
 
         const locationTitle =
-          activeLocation.mode === "geo"
+          activeLocation?.mode === "geo"
             ? (place?.label ?? "Search location")
-            : (zipLabels[zip] ?? zip);
+            : activeLocation?.mode === "zip"
+            ? (zipLabels[zip] ?? zip)
+            : "Choose a location";
+        const currentLocationLabel = compactCurrentLocationLabel(place, activeLocation);
 
         return (
           <div className={`${bgClass} min-h-screen transition-colors duration-700`}>
@@ -1664,11 +2103,23 @@
 
                   {/* Refresh */}
                   <button
+                    onClick={() => useBrowserLocation({ persist: true, fallback: false })}
+                    className={`flex h-10 w-10 items-center justify-center rounded-full shadow hover:opacity-90 active:scale-[0.99] disabled:opacity-60 ${
+                      isDarkUI ? "bg-slate-200/20 text-white ring-1 ring-white/15" : "bg-white text-slate-900 ring-1 ring-black/5"
+                    }`}
+                    disabled={requestingLocation}
+                    title={requestingLocation ? "Finding your location" : "Use current location"}
+                    aria-label={requestingLocation ? "Finding your location" : "Use current location"}
+                  >
+                    <LocationIcon className={`h-4 w-4 ${requestingLocation ? "animate-pulse" : ""}`} />
+                  </button>
+
+                  <button
                     onClick={() => fetchAllForLocation(activeLocation)}
                     className={`flex h-10 w-10 items-center justify-center rounded-full shadow hover:opacity-90 active:scale-[0.99] disabled:opacity-60 ${
                       isDarkUI ? "bg-[#7AC943] text-slate-950" : "bg-[#7AC943] text-slate-950"
                     }`}
-                    disabled={loading}
+                    disabled={loading || !activeLocation}
                     title={loading ? "Refreshing weather" : "Refresh weather"}
                     aria-label={loading ? "Refreshing weather" : "Refresh weather"}
                   >
@@ -1706,26 +2157,73 @@
                       </button>
                     </div>
                     <div className="space-y-3">
+                      <div className={`rounded-2xl p-4 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold">Use Current Location</div>
+                            <div className={`mt-1 text-xs ${subText}`}>
+                              Make WeatherHop open to your browser location on future visits.
+                            </div>
+                            {locationStatus ? <div className={`mt-2 text-xs ${subText}`}>{locationStatus}</div> : null}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (useCurrentLocationDefault) {
+                                localStorage.removeItem(USE_CURRENT_LOCATION_KEY);
+                                setUseCurrentLocationDefault(false);
+                                setLocationStatus("Current location default is off.");
+                                return;
+                              }
+                              useBrowserLocation({ persist: true, fallback: false });
+                            }}
+                            disabled={requestingLocation}
+                            className={`relative h-7 w-12 shrink-0 rounded-full transition disabled:opacity-60 ${
+                              useCurrentLocationDefault ? "bg-[#7AC943]" : isDarkUI ? "bg-white/20" : "bg-slate-300"
+                            }`}
+                            aria-pressed={useCurrentLocationDefault}
+                            aria-label="Use current location as default"
+                            title="Use current location as default"
+                          >
+                            <span
+                              className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition ${
+                                useCurrentLocationDefault ? "left-6" : "left-1"
+                              }`}
+                            ></span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {favorites.length === 0 ? (
+                        <div className={`rounded-2xl p-4 text-sm ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"} ${subText}`}>
+                          Saved locations will appear here after you search for a place and tap the star.
+                        </div>
+                      ) : null}
+
                       {favorites.map((f, idx) => (
-                        <div key={f.zip} className={`flex items-center gap-3 p-3 rounded-2xl ${isDarkUI ? "bg-white/5" : "bg-slate-50"}`}>
+                        <div key={`${makeFavoriteKey(f)}:${idx}`} className={`flex items-center gap-3 p-3 rounded-2xl ${isDarkUI ? "bg-white/5" : "bg-slate-50"}`}>
                           <input
                             type="text"
-                            value={f.label}
+                            value={f.label || ""}
                             onChange={(e) => {
                               const newLabel = e.target.value;
                               setFavorites(prev => prev.map((fav, i) => i === idx ? { ...fav, label: newLabel } : fav));
                             }}
                             className={`flex-1 px-2 py-1 text-sm rounded ${isDarkUI ? "bg-white/10 text-white" : "bg-white text-slate-900"}`}
                           />
-                          <button
-                            onClick={() => {
-                              setDefaultZip(f.zip);
-                              setZip(f.zip);
-                            }}
-                            className={`px-2 py-1 text-xs rounded ${defaultZip === f.zip ? "bg-blue-500 text-white" : "bg-gray-300 text-gray-700"}`}
-                          >
-                            Default
-                          </button>
+                          {f.mode === "zip" ? (
+                            <button
+                              onClick={() => {
+                                localStorage.removeItem(USE_CURRENT_LOCATION_KEY);
+                                setUseCurrentLocationDefault(false);
+                                setDefaultZip(f.zip);
+                                setZip(f.zip);
+                              }}
+                              className={`px-2 py-1 text-xs rounded ${defaultZip === f.zip && !useCurrentLocationDefault ? "bg-blue-500 text-white" : "bg-gray-300 text-gray-700"}`}
+                            >
+                              Default
+                            </button>
+                          ) : null}
                           <button
                             onClick={() => {
                               setFavorites((prev) => {
@@ -1774,23 +2272,6 @@
                             ☆ Add Current Location to Favorites
                           </button>
                         ) : null}
-
-                        <button
-                          onClick={() => {
-                            const defaults = [
-                              { mode: "zip", zip: "84341", label: "Mom & Dad" },
-                              { mode: "zip", zip: "84321", label: "Christina/Katelyn" },
-                              { mode: "zip", zip: "32704", label: "Murriott" },
-                              { mode: "zip", zip: "84770", label: "St. George" },
-                            ];
-                            setFavorites(defaults);
-                            setDefaultZip("84341");
-                            setZip("84341");
-                          }}
-                          className="px-3 py-2 text-sm font-semibold rounded-2xl bg-blue-600 text-white"
-                        >
-                          Restore Default Favorites
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -1811,84 +2292,122 @@
               <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
                 {/* LEFT */}
                 <div className={`rounded-3xl border p-6 ${cardBg} ${borderSoft} shadow-[0_10px_30px_rgba(0,0,0,0.10)] ${cardText}`}>
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start justify-between gap-4">
                     <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold tracking-wide ${subText}`}>
                       <span>Location</span>
                       <span className={`text-xs font-medium normal-case tracking-normal ${subText}`}>
                         {lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : ""}
                       </span>
                     </div>
-                    <button
-                      onClick={() => {
-                        if (!canSaveActive || isActiveFavorited) return;
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        onClick={() => {
+                          if (!canSaveActive || isActiveFavorited) return;
 
-                        const defaultLabel = activeLocation.label || activeLocation.city || activeLocation.zip || "Favorite";
-                        const label = prompt("Name this favorite (e.g., Home, Office)", defaultLabel);
-                        if (!label || !label.trim()) return;
+                          const defaultLabel = activeLocation.label || activeLocation.city || activeLocation.zip || "Favorite";
+                          const label = prompt("Name this favorite (e.g., Home, Office)", defaultLabel);
+                          if (!label || !label.trim()) return;
 
-                        const newFav = {
-                          mode: activeLocation.mode,
-                          zip: activeLocation.mode === "zip" ? activeLocation.zip : "",
-                          lat: activeLocation.mode === "geo" ? activeLocation.lat : null,
-                          lon: activeLocation.mode === "geo" ? activeLocation.lon : null,
-                          city: activeLocation.city || null,
-                          state: activeLocation.state || null,
-                          label: label.trim(),
-                        };
-                        setFavorites((prev) => [...prev, newFav]);
-
-                        if (activeLocation.mode === "zip") {
-                          setZip(activeLocation.zip);
-                          setActiveLocation({
-                            mode: "zip",
-                            zip: activeLocation.zip,
+                          const newFav = {
+                            mode: activeLocation.mode,
+                            zip: activeLocation.mode === "zip" ? activeLocation.zip : "",
+                            lat: activeLocation.mode === "geo" ? activeLocation.lat : null,
+                            lon: activeLocation.mode === "geo" ? activeLocation.lon : null,
+                            city: activeLocation.city || null,
+                            state: activeLocation.state || null,
                             label: label.trim(),
-                            lat: null,
-                            lon: null,
-                            city: null,
-                            state: null,
-                          });
-                          if (!defaultZip) setDefaultZip(activeLocation.zip);
-                        } else {
-                          setActiveLocation({
-                            ...activeLocation,
-                            label: label.trim(),
-                          });
+                          };
+                          setFavorites((prev) => [...prev, newFav]);
+
+                          if (activeLocation.mode === "zip") {
+                            setZip(activeLocation.zip);
+                            setActiveLocation({
+                              mode: "zip",
+                              zip: activeLocation.zip,
+                              label: label.trim(),
+                              lat: null,
+                              lon: null,
+                              city: null,
+                              state: null,
+                            });
+                            if (!defaultZip) setDefaultZip(activeLocation.zip);
+                          } else {
+                            setActiveLocation({
+                              ...activeLocation,
+                              label: label.trim(),
+                            });
+                          }
+                        }}
+                        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-lg shadow transition hover:opacity-90 active:scale-[0.99] ${
+                          !canSaveActive
+                            ? "cursor-not-allowed bg-gray-300 text-gray-700"
+                            : isActiveFavorited
+                            ? "bg-amber-500 text-white"
+                            : isDarkUI
+                            ? "bg-white/10 text-white ring-1 ring-white/15"
+                            : "bg-slate-100 text-slate-900 ring-1 ring-black/5"
+                        }`}
+                        disabled={!canSaveActive || isActiveFavorited}
+                        title={
+                          !canSaveActive
+                            ? "Select a ZIP or place first"
+                            : isActiveFavorited
+                            ? "Favorited"
+                            : "Add this location to favorites"
                         }
-                      }}
-                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-base shadow transition hover:opacity-90 active:scale-[0.99] ${
-                        !canSaveActive
-                          ? "cursor-not-allowed bg-gray-300 text-gray-700"
-                          : isActiveFavorited
-                          ? "bg-amber-500 text-white"
-                          : isDarkUI
-                          ? "bg-white/10 text-white ring-1 ring-white/15"
-                          : "bg-slate-100 text-slate-900 ring-1 ring-black/5"
-                      }`}
-                      disabled={!canSaveActive || isActiveFavorited}
-                      title={
-                        !canSaveActive
-                          ? "Select a ZIP or place first"
-                          : isActiveFavorited
-                          ? "Favorited"
-                          : "Add this location to favorites"
-                      }
-                      aria-label={
-                        !canSaveActive
-                          ? "Select a ZIP or place first"
-                          : isActiveFavorited
-                          ? "Favorited"
-                          : "Add this location to favorites"
-                      }
-                    >
-                      <span aria-hidden="true">{isActiveFavorited ? "★" : "☆"}</span>
-                    </button>
+                        aria-label={
+                          !canSaveActive
+                            ? "Select a ZIP or place first"
+                            : isActiveFavorited
+                            ? "Favorited"
+                            : "Add this location to favorites"
+                        }
+                      >
+                        <span aria-hidden="true">{isActiveFavorited ? "★" : "☆"}</span>
+                      </button>
+
+                      <button
+                        onClick={() => setShowRadar(true)}
+                        className={`group flex h-10 w-10 shrink-0 items-center justify-center rounded-full shadow transition hover:opacity-90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-45 ${
+                          isDarkUI ? "bg-white/10 ring-1 ring-white/15" : "bg-slate-100 ring-1 ring-black/5"
+                        }`}
+                        disabled={!place?.lat || !place?.lon}
+                        title={place?.lat && place?.lon ? "Open radar" : "Choose a location to view radar"}
+                        aria-label={place?.lat && place?.lon ? "Open radar" : "Choose a location to view radar"}
+                      >
+                        <RadarTileIcon className="h-8 w-8" />
+                      </button>
+                    </div>
                   </div>
                   <div className="mt-2 text-lg font-semibold">
-                    {locationTitle}
+                    {currentLocationLabel?.title ?? locationTitle}
                     <span className={`${isDarkUI ? "text-slate-300" : "text-slate-500"} font-normal`}> • </span>
-                    {place ? `${place.city}, ${place.state}${activeLocation.mode === "zip" && place.zip ? ` (${place.zip})` : ""}` : "Loading…"}
+                    {currentLocationLabel
+                      ? currentLocationLabel.detail
+                      : place
+                      ? `${place.city}${place.state ? `, ${place.state}` : ""}${activeLocation?.mode === "zip" && place.zip ? ` (${place.zip})` : ""}`
+                      : activeLocation
+                      ? "Loading…"
+                      : "Search or use current location"}
                   </div>
+
+                  {!activeLocation ? (
+                    <div className={`mt-4 rounded-2xl p-4 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                      <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Get weather where you are</div>
+                      <button
+                        type="button"
+                        onClick={() => useBrowserLocation({ persist: true, fallback: false })}
+                        disabled={requestingLocation}
+                        className={`mt-3 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold shadow disabled:opacity-60 ${
+                          isDarkUI ? "bg-white text-black" : "bg-slate-900 text-white"
+                        }`}
+                      >
+                        <LocationIcon className={`h-4 w-4 ${requestingLocation ? "animate-pulse" : ""}`} />
+                        {requestingLocation ? "Finding Location" : "Use My Location"}
+                      </button>
+                      {locationStatus ? <div className={`mt-2 text-xs ${subText}`}>{locationStatus}</div> : null}
+                    </div>
+                  ) : null}
 
                   <div className="mt-5 grid grid-cols-3 gap-3">
                     <div className={`rounded-2xl p-4 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
@@ -1915,9 +2434,9 @@
                     <div className="flex items-center justify-between">
                       <div>
                         <div className={`text-xs ${subText}`}>Today</div>
-                        <div className={`mt-1 text-sm ${subText}`}>{derived ? weatherLabel(derived.todayCode) : "—"}</div>
+                      <div className={`mt-1 text-sm ${subText}`}>{derived ? derived.todayCondition?.label : "—"}</div>
                       </div>
-                      <div className="text-3xl">{derived ? weatherIcon(derived.todayCode) : "—"}</div>
+                      <div className="text-3xl">{derived ? derived.todayCondition?.icon : "—"}</div>
                     </div>
                     <div className="mt-3 grid grid-cols-2 gap-3">
                       <div className={`rounded-2xl p-3 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-white ring-black/5"}`}>
@@ -2024,6 +2543,7 @@
                         isDarkUI={isDarkUI}
                         nowIndex={nowIndex}
                         formatTooltip={(y) => ` ${Math.round(y)}%`}
+                        minY={0}
                       />
                     </div>
 
@@ -2036,6 +2556,7 @@
                         isDarkUI={isDarkUI}
                         nowIndex={nowIndex}
                         formatTooltip={(y) => ` ${Math.round(y)} mph`}
+                        minY={0}
                       />
                     </div>
                   </div>
@@ -2241,42 +2762,91 @@
                         const high = Number(d.high);
                         const span = Math.max(1, maxHigh - minLow);
                         const startPct = Number.isFinite(low) ? ((low - minLow) / span) * 100 : 0;
-                        const widthPct = Number.isFinite(low) && Number.isFinite(high) ? (Math.max(1, high - low) / span) * 100 : 18;
-                        const showRain = Number(d.precipProb) >= 20;
+	                        const widthPct = Number.isFinite(low) && Number.isFinite(high) ? (Math.max(1, high - low) / span) * 100 : 18;
+	                        const showRain = Number(d.precipProb) >= 20;
+	                        const condition = weatherCondition(d.code, d.low);
 
-                        return (
-                          <button
-                            key={d.date}
-                            type="button"
-                            onClick={() => setSelectedDate(d.date)}
-                            className={`flex w-full items-center gap-3 px-4 py-3 text-left ${
-                              idx > 0 ? (isDarkUI ? "border-t border-white/10" : "border-t border-black/5") : ""
-                            } ${isSelected ? (isDarkUI ? "bg-white/10" : "bg-white/80") : ""}`}
-                            title="Tap to show hourly temps for this date"
-                          >
-                            <div className="w-12 shrink-0 text-xl font-semibold">{idx === 0 ? "Today" : formatWeekdayLabel(d.date)}</div>
-                            <div className="relative w-10 shrink-0 text-center text-3xl leading-none">
-                              {weatherIcon(d.code)}
-                              {showRain ? (
-                                <div className="mt-0.5 text-[11px] font-semibold leading-none text-sky-500">{formatPct(d.precipProb)}</div>
-                              ) : null}
-                            </div>
-                            <div className={`w-12 shrink-0 text-right text-2xl ${subText}`}>{formatTemp(d.low)}</div>
-                            <div className="flex-1 px-1">
-                              <div className={`relative h-2 rounded-full ${isDarkUI ? "bg-white/10" : "bg-slate-200"}`}>
-                                <div
-                                  className="absolute top-0 h-2 rounded-full bg-gradient-to-r from-sky-300 via-cyan-200 to-amber-300"
-                                  style={{
-                                    left: `${Math.max(0, Math.min(100, startPct))}%`,
-                                    width: `${Math.max(8, Math.min(100 - startPct, widthPct))}%`,
-                                  }}
-                                ></div>
-                              </div>
-                            </div>
-                            <div className="w-12 shrink-0 text-right text-2xl font-semibold">{formatTemp(d.high)}</div>
-                          </button>
-                        );
-                      })}
+	                        const isExpanded = expandedForecastDate === d.date;
+	                        const rows = isExpanded ? expandedHourlyRows : [];
+
+	                        return (
+	                          <div
+	                            key={d.date}
+	                            className={`${idx > 0 ? (isDarkUI ? "border-t border-white/10" : "border-t border-black/5") : ""}`}
+	                          >
+	                            <button
+	                              type="button"
+	                              onClick={() => selectForecastDate(d.date)}
+	                              className={`flex w-full items-center gap-3 px-4 py-3 text-left ${
+	                                isSelected ? (isDarkUI ? "bg-white/10" : "bg-white/80") : ""
+	                              }`}
+	                              title="Tap to show hourly forecast for this date"
+	                            >
+	                              <div className="w-12 shrink-0 text-xl font-semibold">{idx === 0 ? "Today" : formatWeekdayLabel(d.date)}</div>
+	                              <div className="relative w-10 shrink-0 text-center text-3xl leading-none">
+	                                {condition.icon}
+	                                {showRain ? (
+	                                  <div className="mt-0.5 text-[11px] font-semibold leading-none text-sky-500">{formatPct(d.precipProb)}</div>
+	                                ) : null}
+	                              </div>
+	                              <div className={`w-12 shrink-0 text-right text-2xl ${subText}`}>{formatTemp(d.low)}</div>
+	                              <div className="flex-1 px-1">
+	                                <div className={`relative h-2 rounded-full ${isDarkUI ? "bg-white/10" : "bg-slate-200"}`}>
+	                                  <div
+	                                    className="absolute top-0 h-2 rounded-full bg-gradient-to-r from-sky-300 via-cyan-200 to-amber-300"
+	                                    style={{
+	                                      left: `${Math.max(0, Math.min(100, startPct))}%`,
+	                                      width: `${Math.max(8, Math.min(100 - startPct, widthPct))}%`,
+	                                    }}
+	                                  ></div>
+	                                </div>
+	                              </div>
+	                              <div className="w-12 shrink-0 text-right text-2xl font-semibold">{formatTemp(d.high)}</div>
+	                            </button>
+
+	                            {isExpanded ? (
+	                              <div
+	                                role="button"
+	                                tabIndex="0"
+	                                onClick={() => setExpandedForecastDate(null)}
+	                                onKeyDown={(e) => {
+	                                  if (e.key === "Enter" || e.key === " ") setExpandedForecastDate(null);
+	                                }}
+	                                className={`px-4 pb-4 ${isDarkUI ? "bg-white/10" : "bg-white/80"}`}
+	                                title="Tap hourly forecast to collapse"
+	                              >
+	                                <div className={`overflow-hidden rounded-2xl ring-1 ${isDarkUI ? "bg-black/15 ring-white/10" : "bg-white ring-black/5"}`}>
+	                                  <div className={`grid grid-cols-[1.15fr_0.65fr_0.8fr_0.8fr_0.9fr] gap-2 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide ${subText}`}>
+	                                    <div>Hour</div>
+	                                    <div className="text-center">Sky</div>
+	                                    <div className="text-right">Temp</div>
+	                                    <div className="text-right">PoP</div>
+	                                    <div className="text-right">Wind</div>
+	                                  </div>
+	                                  {rows.length ? (
+	                                    rows.map((row, rowIdx) => (
+	                                      <div
+	                                        key={`${d.date}:${rowIdx}`}
+	                                        className={`grid grid-cols-[1.15fr_0.65fr_0.8fr_0.8fr_0.9fr] gap-2 px-3 py-2 text-sm ${
+	                                          rowIdx > 0 ? (isDarkUI ? "border-t border-white/10" : "border-t border-black/5") : ""
+	                                        }`}
+	                                      >
+	                                        <div className="font-semibold">{row.time}</div>
+	                                        <div className="text-center text-lg leading-none" title={weatherCondition(row.code, row.temp).label}>{weatherCondition(row.code, row.temp).icon}</div>
+	                                        <div className="text-right">{formatTemp(row.temp)}</div>
+	                                        <div className="text-right">{formatPct(row.precip)}</div>
+	                                        <div className="text-right">{formatMph(row.wind)}</div>
+	                                      </div>
+	                                    ))
+	                                  ) : (
+	                                    <div className={`px-3 py-3 text-sm ${subText}`}>No hourly data for this date.</div>
+	                                  )}
+	                                </div>
+	                              </div>
+	                            ) : null}
+	                          </div>
+	                        );
+	                      })}
                     </div>
                   ) : null}
 
@@ -2311,20 +2881,21 @@
                         ? "bg-white/5 ring-white/10"
                         : "bg-slate-50 ring-black/5";
 
-                    const selectedRing = isSelected
-                      ? isDarkUI
-                        ? "ring-2 ring-white/25"
-                        : "ring-2 ring-black/10"
-                      : "ring-1";
+	                        const selectedRing = isSelected
+	                          ? isDarkUI
+	                            ? "ring-2 ring-white/25"
+	                            : "ring-2 ring-black/10"
+	                          : "ring-1";
+	                    const condition = weatherCondition(d.code, d.low);
 
                     return (
-                      <button
-                        key={d.date}
-                        type="button"
-                        className={`block w-full rounded-3xl p-4 text-left shadow-[0_10px_30px_rgba(0,0,0,0.08)] ${highlightClass} ${selectedRing}`}
-                        onClick={() => setSelectedDate(d.date)}
-                        title="Tap to show hourly temps for this date"
-                      >
+	                      <button
+	                        key={d.date}
+	                        type="button"
+	                        className={`block w-full rounded-3xl p-4 text-left shadow-[0_10px_30px_rgba(0,0,0,0.08)] ${highlightClass} ${selectedRing}`}
+	                        onClick={() => selectForecastDate(d.date)}
+	                        title="Tap to show hourly forecast for this date"
+	                      >
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <div className="flex items-center gap-2">
@@ -2337,11 +2908,11 @@
                               ) : null}
                             </div>
                             <div className={`mt-1 text-sm ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>
-                              {weatherLabel(d.code)}
+	                              {condition.label}
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
-                            <div className="text-3xl leading-none">{weatherIcon(d.code)}</div>
+	                            <div className="text-3xl leading-none">{condition.icon}</div>
                           </div>
                         </div>
 
@@ -2432,45 +3003,96 @@
                             : "ring-2 ring-black/10"
                           : "ring-1";
 
-                        return (
-                          <tr
-                            key={d.date}
-                            className={`cursor-pointer rounded-2xl ${highlightClass} ${selectedRing}`}
-                            onClick={() => setSelectedDate(d.date)}
-                            title="Click to show hourly temps for this date"
-                          >
-                            <td
-                              className={`sticky left-0 z-10 px-3 py-3 text-sm font-semibold ${
-                                isDarkUI ? "bg-slate-950/95" : "bg-white/95"
-                              } backdrop-blur shadow-[8px_0_16px_rgba(15,23,42,0.08)]`}
-                            >
-                              {formatWeekdayLabel(d.date)}
-                            </td>
-                            <td className="px-3 py-3 text-xl">
-                              {weatherIcon(d.code)}{" "}
-                              {isMaxHigh ? (
-                                <span className="ml-2 inline-block align-middle leading-none">
-                                  <ThermometerBadge color="#f43f5e" label="Hottest day" level="high"></ThermometerBadge>
-                                </span>
-                              ) : null}
-                              {isMinLow ? (
-                                <span className="ml-1 inline-block align-middle leading-none">
-                                  <ThermometerBadge color="#0ea5e9" label="Coldest day" level="low"></ThermometerBadge>
-                                </span>
-                              ) : null}
-                            </td>
-                            <td className={`px-3 py-3 text-sm ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>
-                              {weatherLabel(d.code)}
-                            </td>
-                            <td className="px-3 py-3 text-sm font-semibold">{formatTemp(d.high)}</td>
-                            <td className="px-3 py-3 text-sm font-semibold">{formatTemp(d.low)}</td>
-                            <td className="px-3 py-3 text-sm">{formatPct(d.humidMax)}</td>
-                            <td className="px-3 py-3 text-sm">{formatPct(d.precipProb)}</td>
-                            <td className="px-3 py-3 text-sm">{formatInches(d.precip)}</td>
-                            <td className="px-3 py-3 text-sm">{formatMph(d.windMax)}</td>
-                          </tr>
-                        );
-                      })}
+	                        const isExpanded = expandedForecastDate === d.date;
+	                        const rows = isExpanded ? expandedHourlyRows : [];
+
+	                        return (
+	                          <React.Fragment key={d.date}>
+	                            <tr
+	                              className={`cursor-pointer rounded-2xl ${highlightClass} ${selectedRing}`}
+	                              onClick={() => selectForecastDate(d.date)}
+	                              title="Click to show hourly forecast for this date"
+	                            >
+	                              <td
+	                                className={`sticky left-0 z-10 px-3 py-3 text-sm font-semibold ${
+	                                  isDarkUI ? "bg-slate-950/95" : "bg-white/95"
+	                                } backdrop-blur shadow-[8px_0_16px_rgba(15,23,42,0.08)]`}
+	                              >
+	                                {formatWeekdayLabel(d.date)}
+	                              </td>
+	                              <td className="px-3 py-3 text-xl">
+	                                {condition.icon}{" "}
+	                                {isMaxHigh ? (
+	                                  <span className="ml-2 inline-block align-middle leading-none">
+	                                    <ThermometerBadge color="#f43f5e" label="Hottest day" level="high"></ThermometerBadge>
+	                                  </span>
+	                                ) : null}
+	                                {isMinLow ? (
+	                                  <span className="ml-1 inline-block align-middle leading-none">
+	                                    <ThermometerBadge color="#0ea5e9" label="Coldest day" level="low"></ThermometerBadge>
+	                                  </span>
+	                                ) : null}
+	                              </td>
+	                              <td className={`px-3 py-3 text-sm ${isDarkUI ? "text-slate-200" : "text-slate-700"}`}>
+	                                {condition.label}
+	                              </td>
+	                              <td className="px-3 py-3 text-sm font-semibold">{formatTemp(d.high)}</td>
+	                              <td className="px-3 py-3 text-sm font-semibold">{formatTemp(d.low)}</td>
+	                              <td className="px-3 py-3 text-sm">{formatPct(d.humidMax)}</td>
+	                              <td className="px-3 py-3 text-sm">{formatPct(d.precipProb)}</td>
+	                              <td className="px-3 py-3 text-sm">{formatInches(d.precip)}</td>
+	                              <td className="px-3 py-3 text-sm">{formatMph(d.windMax)}</td>
+	                            </tr>
+	                            {isExpanded ? (
+	                              <tr>
+	                                <td colSpan="9" className="px-0 pb-2">
+	                                  <div
+	                                    role="button"
+	                                    tabIndex="0"
+	                                    onClick={() => setExpandedForecastDate(null)}
+	                                    onKeyDown={(e) => {
+	                                      if (e.key === "Enter" || e.key === " ") setExpandedForecastDate(null);
+	                                    }}
+	                                    className={`cursor-pointer rounded-2xl p-4 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-white/80 ring-black/5"}`}
+	                                    title="Click hourly forecast to collapse"
+	                                  >
+	                                    <div className={`mb-3 text-xs font-semibold uppercase tracking-wide ${subText}`}>
+	                                      Hourly forecast • {formatDateLabel(d.date)}
+	                                    </div>
+	                                    {rows.length ? (
+	                                      <div className={`overflow-hidden rounded-2xl ring-1 ${isDarkUI ? "bg-black/15 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+	                                        <div className={`grid grid-cols-[1fr_0.5fr_1fr_1fr_1fr] gap-3 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide ${subText}`}>
+	                                          <div>Hour</div>
+	                                          <div className="text-center">Sky</div>
+	                                          <div className="text-right">Temp</div>
+	                                          <div className="text-right">PoP</div>
+	                                          <div className="text-right">Wind</div>
+	                                        </div>
+	                                        {rows.map((row, rowIdx) => (
+	                                          <div
+	                                            key={`${d.date}:desktop:${rowIdx}`}
+	                                            className={`grid grid-cols-[1fr_0.5fr_1fr_1fr_1fr] gap-3 px-4 py-2.5 text-sm ${
+	                                              rowIdx > 0 ? (isDarkUI ? "border-t border-white/10" : "border-t border-black/5") : ""
+	                                            }`}
+	                                          >
+	                                            <div className="font-semibold">{row.time}</div>
+	                                            <div className="text-center text-lg leading-none" title={weatherCondition(row.code, row.temp).label}>{weatherCondition(row.code, row.temp).icon}</div>
+	                                            <div className="text-right">{formatTemp(row.temp)}</div>
+	                                            <div className="text-right">{formatPct(row.precip)}</div>
+	                                            <div className="text-right">{formatMph(row.wind)}</div>
+	                                          </div>
+	                                        ))}
+	                                      </div>
+	                                    ) : (
+	                                      <div className={`text-sm ${subText}`}>No hourly data for this date.</div>
+	                                    )}
+	                                  </div>
+	                                </td>
+	                              </tr>
+	                            ) : null}
+	                          </React.Fragment>
+	                        );
+	                      })}
                     </tbody>
                   </table>
                 </div>
@@ -2786,6 +3408,15 @@
                   </div>
                 )}
               </div>
+
+              <RadarOverlay
+                open={showRadar}
+                onClose={() => setShowRadar(false)}
+                lat={place?.lat}
+                lon={place?.lon}
+                locationName={locationTitle}
+                isDarkUI={isDarkUI}
+              />
 
               {/* Local server tip (hidden, kept for reference) */}
               <div className="hidden">
