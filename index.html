@@ -53,6 +53,53 @@
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
       }
+
+      .weatherhop-radar-pin-shell {
+        background: transparent;
+        border: 0;
+      }
+
+      .weatherhop-radar-pin {
+        position: relative;
+        width: 48px;
+        height: 58px;
+        filter: drop-shadow(0 8px 12px rgba(15, 23, 42, 0.35));
+      }
+
+      .weatherhop-radar-pin::before {
+        content: "";
+        position: absolute;
+        inset: 0 4px 10px;
+        border-radius: 50% 50% 50% 8px;
+        background: linear-gradient(145deg, #ffffff, #dff5ff);
+        border: 3px solid #0f766e;
+        transform: rotate(-45deg);
+        box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.75);
+      }
+
+      .weatherhop-radar-pin img {
+        position: absolute;
+        left: 9px;
+        top: 7px;
+        width: 30px;
+        height: 30px;
+        border-radius: 999px;
+        object-fit: cover;
+        background: #ffffff;
+        transform: translateZ(0);
+      }
+
+      .weatherhop-radar-pin::after {
+        content: "";
+        position: absolute;
+        left: 20px;
+        bottom: 1px;
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #0f766e;
+        box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.9);
+      }
     </style>
   </head>
 
@@ -731,7 +778,17 @@
             attribution: "&copy; OpenStreetMap",
           }).addTo(map);
 
-          window.L.marker([Number(lat), Number(lon)]).addTo(map);
+          const frogPinIcon = window.L.divIcon({
+            className: "weatherhop-radar-pin-shell",
+            html: '<div class="weatherhop-radar-pin"><img src="./weatherhop_frog_favicon.png" alt="" /></div>',
+            iconSize: [48, 58],
+            iconAnchor: [24, 57],
+          });
+
+          window.L.marker([Number(lat), Number(lon)], {
+            icon: frogPinIcon,
+            title: locationName ? `WeatherHop radar for ${locationName}` : "WeatherHop radar location",
+          }).addTo(map);
           mapRef.current = map;
 
           setTimeout(() => map.invalidateSize(), 80);
