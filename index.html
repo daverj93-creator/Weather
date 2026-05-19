@@ -195,6 +195,162 @@
         return "Favorite";
       }
 
+      const WEATHERHOP_TRIPS_STORAGE_KEY = "weatherhop-trips";
+      const TRIP_FORECAST_CACHE_MS = 45 * 60 * 1000;
+
+      function todayISODate() {
+        return new Date().toISOString().slice(0, 10);
+      }
+
+      function makeId(prefix = "id") {
+        if (window.crypto?.randomUUID) return `${prefix}-${window.crypto.randomUUID()}`;
+        return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      }
+
+      function addDaysISO(dateISO, days) {
+        const date = new Date(`${dateISO}T12:00:00`);
+        date.setDate(date.getDate() + days);
+        return date.toISOString().slice(0, 10);
+      }
+
+      function dateRangeISO(startDate, endDate) {
+        if (!startDate || !endDate || endDate < startDate) return [];
+        const dates = [];
+        let current = startDate;
+        while (current <= endDate && dates.length < 45) {
+          dates.push(current);
+          current = addDaysISO(current, 1);
+        }
+        return dates;
+      }
+
+      function shortDateLabel(dateISO) {
+        try {
+          const date = new Date(`${dateISO}T12:00:00`);
+          return new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(date);
+        } catch {
+          return dateISO;
+        }
+      }
+
+      function isUserAtLocationOnDate(location, date) {
+        return !!location?.arrivalDate && !!location?.departureDate && date >= location.arrivalDate && date <= location.departureDate;
+      }
+
+      function loadTrips() {
+        try {
+          const raw = localStorage.getItem(WEATHERHOP_TRIPS_STORAGE_KEY);
+          const parsed = raw ? JSON.parse(raw) : [];
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      }
+
+      function saveTrips(trips) {
+        localStorage.setItem(WEATHERHOP_TRIPS_STORAGE_KEY, JSON.stringify(trips ?? []));
+      }
+
+      function createDefaultTrip() {
+        const startDate = todayISODate();
+        const endDate = addDaysISO(startDate, 4);
+        const now = new Date().toISOString();
+        return {
+          id: makeId("trip"),
+          name: "New Trip",
+          startDate,
+          endDate,
+          locations: [],
+          createdAt: now,
+          updatedAt: now,
+          notes: "",
+        };
+      }
+
+      function normalizeTrip(trip) {
+        const base = createDefaultTrip();
+        return {
+          ...base,
+          ...trip,
+          locations: Array.isArray(trip?.locations) ? trip.locations : [],
+          updatedAt: new Date().toISOString(),
+        };
+      }
+
+      function tripForecastCacheKey(lat, lon) {
+        return `weatherhop-trip-forecast-${Number(lat).toFixed(4)}-${Number(lon).toFixed(4)}`;
+      }
+
+      async function fetchTripForecast({ lat, lon }) {
+        const cacheKey = tripForecastCacheKey(lat, lon);
+        try {
+          const cached = JSON.parse(localStorage.getItem(cacheKey) || "null");
+          if (cached?.savedAt && Date.now() - cached.savedAt < TRIP_FORECAST_CACHE_MS && cached?.data) {
+            return cached.data;
+          }
+        } catch {}
+
+        const params = new URLSearchParams({
+          latitude: String(lat),
+          longitude: String(lon),
+          timezone: "auto",
+          temperature_unit: "fahrenheit",
+          precipitation_unit: "inch",
+          wind_speed_unit: "mph",
+          forecast_days: "10",
+          daily:
+            "temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,windspeed_10m_max,weathercode",
+        });
+        const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`);
+        if (!response.ok) throw new Error(`Forecast failed (${response.status}).`);
+        const data = await response.json();
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ savedAt: Date.now(), data }));
+        } catch {}
+        return data;
+      }
+
+      function tripCellFromForecast({ forecast, location, date }) {
+        const daily = forecast?.daily;
+        const idx = daily?.time?.findIndex((value) => value === date) ?? -1;
+        const isUserThere = isUserAtLocationOnDate(location, date);
+        if (idx >= 0) {
+          const code = daily.weathercode?.[idx];
+          const condition = weatherCondition(code, daily.temperature_2m_min?.[idx]);
+          const precip = daily.precipitation_probability_max?.[idx];
+          const wind = daily.windspeed_10m_max?.[idx];
+          const high = daily.temperature_2m_max?.[idx];
+          const low = daily.temperature_2m_min?.[idx];
+          const risks = [];
+          if (Number(precip) >= 50) risks.push("Rain");
+          if (Number(high) >= 90) risks.push("Heat");
+          if (Number(low) <= 40) risks.push("Cold");
+          if (Number(wind) >= 25) risks.push("Wind");
+          if ([95, 96, 99].includes(Number(code))) risks.push("Storm");
+          return {
+            date,
+            isUserThere,
+            status: "available",
+            highTemp: high,
+            lowTemp: low,
+            conditionLabel: condition.label,
+            conditionIcon: condition.icon,
+            precipitationChance: precip,
+            windSpeed: wind,
+            riskLevel: risks.length >= 2 || risks.includes("Storm") ? "high" : risks.length ? "moderate" : "low",
+            riskSummary: risks.join(", "),
+          };
+        }
+
+        const forecastDates = daily?.time ?? [];
+        const maxForecastDate = forecastDates.length ? forecastDates[forecastDates.length - 1] : null;
+        return {
+          date,
+          isUserThere,
+          status: maxForecastDate && date > maxForecastDate ? "pending" : "unavailable",
+        };
+      }
+
       function compactCurrentLocationLabel(place, activeLocation) {
         if (activeLocation?.source !== "current") return null;
         const city = place?.city && place.city !== "—" ? place.city : "Current Location";
@@ -1086,6 +1242,514 @@
         return <canvas ref={canvasRef}></canvas>;
       }
 
+      function TravelPlanner({ isDarkUI, cardBg, borderSoft, cardText, subText }) {
+        const [trips, setTrips] = useState(() => loadTrips());
+        const [selectedTripId, setSelectedTripId] = useState(() => loadTrips()[0]?.id ?? "");
+        const [searchText, setSearchText] = useState("");
+        const [searchResults, setSearchResults] = useState([]);
+        const [searchLoading, setSearchLoading] = useState(false);
+        const [forecastByLocation, setForecastByLocation] = useState({});
+        const searchTimerRef = useRef(null);
+
+        useEffect(() => {
+          saveTrips(trips);
+          if (trips.length && !trips.some((trip) => trip.id === selectedTripId)) {
+            setSelectedTripId(trips[0].id);
+          }
+          if (!trips.length) setSelectedTripId("");
+        }, [trips, selectedTripId]);
+
+        const selectedTrip = trips.find((trip) => trip.id === selectedTripId) ?? trips[0] ?? null;
+        const tripDates = useMemo(
+          () => dateRangeISO(selectedTrip?.startDate, selectedTrip?.endDate),
+          [selectedTrip?.startDate, selectedTrip?.endDate]
+        );
+
+        function updateSelectedTrip(patchOrUpdater) {
+          if (!selectedTrip) return;
+          setTrips((prev) =>
+            prev.map((trip) => {
+              if (trip.id !== selectedTrip.id) return trip;
+              const patch = typeof patchOrUpdater === "function" ? patchOrUpdater(trip) : patchOrUpdater;
+              return normalizeTrip({ ...trip, ...patch });
+            })
+          );
+        }
+
+        function updateTripDates(field, value) {
+          updateSelectedTrip((trip) => {
+            let startDate = field === "startDate" ? value : trip.startDate;
+            let endDate = field === "endDate" ? value : trip.endDate;
+            if (startDate && endDate && startDate > endDate) {
+              if (field === "startDate") endDate = startDate;
+              else startDate = endDate;
+            }
+            const locations = (trip.locations ?? []).map((location) => {
+              const arrivalDate = location.arrivalDate < startDate ? startDate : location.arrivalDate > endDate ? endDate : location.arrivalDate;
+              const departureDate =
+                location.departureDate < arrivalDate
+                  ? arrivalDate
+                  : location.departureDate > endDate
+                  ? endDate
+                  : location.departureDate;
+              return { ...location, arrivalDate, departureDate };
+            });
+            return { startDate, endDate, locations };
+          });
+        }
+
+        function createTrip() {
+          const trip = createDefaultTrip();
+          setTrips((prev) => [trip, ...prev]);
+          setSelectedTripId(trip.id);
+        }
+
+        function duplicateTrip() {
+          if (!selectedTrip) return;
+          const now = new Date().toISOString();
+          const copy = {
+            ...selectedTrip,
+            id: makeId("trip"),
+            name: `${selectedTrip.name || "Trip"} Copy`,
+            createdAt: now,
+            updatedAt: now,
+            locations: (selectedTrip.locations ?? []).map((location) => ({ ...location, id: makeId("trip-location") })),
+          };
+          setTrips((prev) => [copy, ...prev]);
+          setSelectedTripId(copy.id);
+        }
+
+        function deleteTrip() {
+          if (!selectedTrip) return;
+          if (!window.confirm(`Delete ${selectedTrip.name || "this trip"}?`)) return;
+          setTrips((prev) => prev.filter((trip) => trip.id !== selectedTrip.id));
+        }
+
+        useEffect(() => {
+          const q = String(searchText ?? "").trim();
+          if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+          if (!q) {
+            setSearchResults([]);
+            setSearchLoading(false);
+            return;
+          }
+
+          setSearchLoading(true);
+          searchTimerRef.current = setTimeout(async () => {
+            try {
+              const results = [];
+              if (isLikelyZip(q)) results.push({ _type: "zip", zip: q, label: `ZIP ${q}` });
+              const params = new URLSearchParams({ name: q, count: "6", language: "en", format: "json" });
+              const res = await fetch(`${GEO_API}?${params.toString()}`);
+              if (res.ok) {
+                const json = await res.json();
+                for (const place of json?.results ?? []) {
+                  results.push({ ...place, _type: "geo", label: nicePlaceLabel(place) });
+                }
+              }
+              setSearchResults(results.slice(0, 8));
+            } catch {
+              setSearchResults([]);
+            } finally {
+              setSearchLoading(false);
+            }
+          }, 300);
+
+          return () => {
+            if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+          };
+        }, [searchText]);
+
+        async function resolveTripSearchResult(result) {
+          if (result?._type === "zip") {
+            const zipRes = await fetch(`${ZIP_API}${result.zip}`);
+            if (!zipRes.ok) throw new Error("ZIP lookup failed.");
+            const json = await zipRes.json();
+            const first = json?.places?.[0];
+            const lat = Number(first?.latitude);
+            const lon = Number(first?.longitude);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error("ZIP lookup returned invalid coordinates.");
+            const displayName = `${first["place name"]}, ${first["state abbreviation"] ?? first.state ?? ""}`.replace(/, $/, "");
+            return { displayName, name: displayName, latitude: lat, longitude: lon };
+          }
+
+          const lat = Number(result?.latitude);
+          const lon = Number(result?.longitude);
+          if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error("Location is missing coordinates.");
+          const displayName = nicePlaceLabel(result);
+          return { displayName, name: result.name || displayName, latitude: lat, longitude: lon };
+        }
+
+        async function addTripLocation(result) {
+          if (!selectedTrip || !result) return;
+          try {
+            const resolved = await resolveTripSearchResult(result);
+            const location = {
+              id: makeId("trip-location"),
+              name: resolved.name,
+              displayName: resolved.displayName,
+              latitude: resolved.latitude,
+              longitude: resolved.longitude,
+              arrivalDate: selectedTrip.startDate,
+              departureDate: selectedTrip.endDate,
+              notes: "",
+            };
+            updateSelectedTrip({ locations: [...(selectedTrip.locations ?? []), location] });
+            setSearchText("");
+            setSearchResults([]);
+          } catch (e) {
+            window.alert(e?.message ?? "Could not add that location.");
+          }
+        }
+
+        function updateLocation(locationId, patch) {
+          updateSelectedTrip((trip) => ({
+            locations: (trip.locations ?? []).map((location) => {
+              if (location.id !== locationId) return location;
+              let next = { ...location, ...patch };
+              if (next.arrivalDate < trip.startDate) next.arrivalDate = trip.startDate;
+              if (next.arrivalDate > trip.endDate) next.arrivalDate = trip.endDate;
+              if (next.departureDate < next.arrivalDate) next.departureDate = next.arrivalDate;
+              if (next.departureDate > trip.endDate) next.departureDate = trip.endDate;
+              return next;
+            }),
+          }));
+        }
+
+        function removeLocation(locationId) {
+          updateSelectedTrip((trip) => ({
+            locations: (trip.locations ?? []).filter((location) => location.id !== locationId),
+          }));
+        }
+
+        useEffect(() => {
+          if (!selectedTrip?.locations?.length) {
+            setForecastByLocation({});
+            return;
+          }
+
+          let cancelled = false;
+          selectedTrip.locations.forEach((location) => {
+            if (!Number.isFinite(Number(location.latitude)) || !Number.isFinite(Number(location.longitude))) return;
+            setForecastByLocation((prev) => ({
+              ...prev,
+              [location.id]: prev[location.id]?.data ? prev[location.id] : { loading: true, error: "", data: null },
+            }));
+            fetchTripForecast({ lat: location.latitude, lon: location.longitude })
+              .then((data) => {
+                if (!cancelled) {
+                  setForecastByLocation((prev) => ({ ...prev, [location.id]: { loading: false, error: "", data } }));
+                }
+              })
+              .catch((e) => {
+                if (!cancelled) {
+                  setForecastByLocation((prev) => ({
+                    ...prev,
+                    [location.id]: { loading: false, error: e?.message ?? "Forecast unavailable", data: null },
+                  }));
+                }
+              });
+          });
+
+          return () => {
+            cancelled = true;
+          };
+        }, [selectedTrip?.id, selectedTrip?.locations?.map((location) => `${location.id}:${location.latitude}:${location.longitude}`).join("|")]);
+
+        const tripSummary = useMemo(() => {
+          if (!selectedTrip?.locations?.length || !tripDates.length) return [];
+          const availableHereCells = [];
+          for (const location of selectedTrip.locations) {
+            const forecast = forecastByLocation[location.id]?.data;
+            for (const date of tripDates) {
+              const cell = tripCellFromForecast({ forecast, location, date });
+              if (cell.isUserThere && cell.status === "available") availableHereCells.push({ location, cell });
+            }
+          }
+
+          const notes = [];
+          const rainy = availableHereCells.filter(({ cell }) => Number(cell.precipitationChance) >= 50);
+          const stormy = availableHereCells.filter(({ cell }) => String(cell.riskSummary || "").includes("Storm"));
+          const windy = availableHereCells.filter(({ cell }) => Number(cell.windSpeed) >= 25);
+          const hottest = availableHereCells.reduce((best, item) => (Number(item.cell.highTemp) > Number(best?.cell?.highTemp ?? -999) ? item : best), null);
+          const coldest = availableHereCells.reduce((best, item) => (Number(item.cell.lowTemp) < Number(best?.cell?.lowTemp ?? 999) ? item : best), null);
+
+          if (rainy[0]) notes.push(`Rain risk: ${rainy[0].location.displayName} on ${shortDateLabel(rainy[0].cell.date)} (${formatPct(rainy[0].cell.precipitationChance)}).`);
+          if (stormy[0]) notes.push(`Storm risk: ${stormy[0].location.displayName} on ${shortDateLabel(stormy[0].cell.date)}.`);
+          if (hottest?.cell) notes.push(`Warmest scheduled day: ${hottest.location.displayName}, ${shortDateLabel(hottest.cell.date)} at ${formatTemp(hottest.cell.highTemp)}.`);
+          if (coldest?.cell) notes.push(`Coolest scheduled morning: ${coldest.location.displayName}, ${shortDateLabel(coldest.cell.date)} at ${formatTemp(coldest.cell.lowTemp)}.`);
+          if (windy[0]) notes.push(`Windy day possible: ${windy[0].location.displayName} on ${shortDateLabel(windy[0].cell.date)} (${formatMph(windy[0].cell.windSpeed)}).`);
+          return notes.slice(0, 5);
+        }, [selectedTrip, tripDates.join(","), forecastByLocation]);
+
+        const inputClass = `rounded-2xl px-3 py-2 text-sm outline-none ring-1 ${
+          isDarkUI ? "bg-white/10 text-white ring-white/10 placeholder:text-slate-400" : "bg-white text-slate-900 ring-black/10 placeholder:text-slate-400"
+        }`;
+        const buttonClass = `rounded-2xl px-3 py-2 text-sm font-semibold shadow active:scale-[0.99] ${
+          isDarkUI ? "bg-white/10 text-white ring-1 ring-white/15 hover:bg-white/15" : "bg-white text-slate-900 ring-1 ring-black/5 hover:bg-slate-50"
+        }`;
+
+        return (
+          <div className={`mt-6 rounded-3xl border p-4 sm:p-6 ${cardBg} ${borderSoft} ${cardText} shadow-[0_10px_30px_rgba(0,0,0,0.10)]`}>
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>WeatherHop Travel</div>
+                <h1 className="mt-1 text-2xl font-semibold tracking-normal">Trip weather planner</h1>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  className={`${inputClass} min-w-[210px]`}
+                  value={selectedTrip?.id ?? ""}
+                  onChange={(e) => setSelectedTripId(e.target.value)}
+                  disabled={!trips.length}
+                >
+                  {trips.length ? null : <option value="">No saved trips</option>}
+                  {trips.map((trip) => (
+                    <option key={trip.id} value={trip.id}>
+                      {trip.name || "Untitled trip"}
+                    </option>
+                  ))}
+                </select>
+                <button type="button" onClick={createTrip} className={buttonClass}>New trip</button>
+                {selectedTrip ? <button type="button" onClick={duplicateTrip} className={buttonClass}>Duplicate</button> : null}
+                {selectedTrip ? <button type="button" onClick={deleteTrip} className={`${buttonClass} ${isDarkUI ? "text-red-100" : "text-red-700"}`}>Delete</button> : null}
+              </div>
+            </div>
+
+            {!selectedTrip ? (
+              <div className={`mt-6 rounded-3xl p-6 text-sm ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"} ${subText}`}>
+                Create a trip to start planning weather across locations and dates.
+              </div>
+            ) : (
+              <div className="mt-6 space-y-5">
+                <div className={`grid gap-3 rounded-3xl p-4 ring-1 md:grid-cols-[1.2fr_0.7fr_0.7fr] ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                  <label className="block">
+                    <span className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Trip name</span>
+                    <input
+                      className={`${inputClass} mt-1 w-full`}
+                      value={selectedTrip.name}
+                      onChange={(e) => updateSelectedTrip({ name: e.target.value })}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Start</span>
+                    <input
+                      type="date"
+                      className={`${inputClass} mt-1 w-full`}
+                      value={selectedTrip.startDate}
+                      onChange={(e) => updateTripDates("startDate", e.target.value)}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>End</span>
+                    <input
+                      type="date"
+                      className={`${inputClass} mt-1 w-full`}
+                      value={selectedTrip.endDate}
+                      onChange={(e) => updateTripDates("endDate", e.target.value)}
+                    />
+                  </label>
+                </div>
+
+                <div className={`rounded-3xl p-4 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                    <div>
+                      <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Locations</div>
+                      <div className={`mt-1 text-sm ${subText}`}>Add each stop, then set the dates you expect to be there.</div>
+                    </div>
+                    <div className="relative w-full lg:w-[360px]">
+                      <input
+                        className={`${inputClass} w-full`}
+                        value={searchText}
+                        onChange={(e) => setSearchText(e.target.value)}
+                        placeholder="Search city, state, or ZIP"
+                      />
+                      {searchText ? (
+                        <div className={`absolute left-0 right-0 z-[70] mt-2 overflow-hidden rounded-3xl border shadow-[0_20px_50px_rgba(0,0,0,0.20)] ${
+                          isDarkUI ? "border-white/10 bg-black/85" : "border-black/5 bg-white/95"
+                        }`}>
+                          <div className={`px-4 py-3 text-xs ${subText}`}>{searchLoading ? "Searching..." : searchResults.length ? "Add location:" : "No matches yet."}</div>
+                          {searchResults.map((result, idx) => (
+                            <button
+                              key={`${result._type}:${result.id ?? result.zip ?? idx}`}
+                              type="button"
+                              className={`w-full px-4 py-3 text-left text-sm ${isDarkUI ? "hover:bg-white/10" : "hover:bg-black/5"}`}
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => addTripLocation(result)}
+                            >
+                              <span className="font-semibold">{result.label || nicePlaceLabel(result)}</span>
+                              <span className={`ml-2 text-xs ${subText}`}>{result._type === "zip" ? "ZIP" : "City"}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="mt-4 space-y-3">
+                    {(selectedTrip.locations ?? []).length ? null : (
+                      <div className={`rounded-2xl p-4 text-sm ring-1 ${isDarkUI ? "bg-black/10 ring-white/10" : "bg-white ring-black/5"} ${subText}`}>
+                        Add at least one location to build the grid.
+                      </div>
+                    )}
+
+                    {(selectedTrip.locations ?? []).map((location) => (
+                      <div
+                        key={location.id}
+                        className={`grid gap-3 rounded-2xl p-3 ring-1 lg:grid-cols-[1.2fr_0.55fr_0.55fr_auto] lg:items-end ${
+                          isDarkUI ? "bg-black/10 ring-white/10" : "bg-white ring-black/5"
+                        }`}
+                      >
+                        <label className="block">
+                          <span className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Stop</span>
+                          <input
+                            className={`${inputClass} mt-1 w-full`}
+                            value={location.displayName}
+                            onChange={(e) => updateLocation(location.id, { displayName: e.target.value, name: e.target.value })}
+                          />
+                        </label>
+                        <label className="block">
+                          <span className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Arrive</span>
+                          <input
+                            type="date"
+                            className={`${inputClass} mt-1 w-full`}
+                            min={selectedTrip.startDate}
+                            max={selectedTrip.endDate}
+                            value={location.arrivalDate}
+                            onChange={(e) => updateLocation(location.id, { arrivalDate: e.target.value })}
+                          />
+                        </label>
+                        <label className="block">
+                          <span className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Depart</span>
+                          <input
+                            type="date"
+                            className={`${inputClass} mt-1 w-full`}
+                            min={location.arrivalDate || selectedTrip.startDate}
+                            max={selectedTrip.endDate}
+                            value={location.departureDate}
+                            onChange={(e) => updateLocation(location.id, { departureDate: e.target.value })}
+                          />
+                        </label>
+                        <button type="button" onClick={() => removeLocation(location.id)} className={`${buttonClass} h-10`}>Remove</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className={`rounded-3xl p-4 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-slate-50 ring-black/5"}`}>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <div className={`text-xs font-semibold uppercase tracking-wide ${subText}`}>Trip summary</div>
+                      <div className={`mt-1 text-sm ${subText}`}>Generated from scheduled days with available forecast data.</div>
+                    </div>
+                    <div className={`text-xs ${subText}`}>{tripDates.length} trip days</div>
+                  </div>
+                  {tripSummary.length ? (
+                    <div className="mt-4 grid gap-2 lg:grid-cols-2">
+                      {tripSummary.map((item, idx) => (
+                        <div key={`${item}:${idx}`} className={`rounded-2xl px-3 py-2 text-sm ring-1 ${isDarkUI ? "bg-black/10 ring-white/10" : "bg-white ring-black/5"}`}>
+                          {item}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className={`mt-4 rounded-2xl p-4 text-sm ring-1 ${isDarkUI ? "bg-black/10 ring-white/10" : "bg-white ring-black/5"} ${subText}`}>
+                      Summary appears after locations have forecast data for scheduled dates.
+                    </div>
+                  )}
+                </div>
+
+                <div className={`overflow-hidden rounded-3xl ring-1 ${isDarkUI ? "ring-white/10" : "ring-black/5"}`}>
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[920px] border-separate border-spacing-0">
+                      <thead>
+                        <tr className={isDarkUI ? "bg-slate-950/90" : "bg-white"}>
+                          <th className={`sticky left-0 z-20 min-w-[190px] px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide ${subText} ${isDarkUI ? "bg-slate-950" : "bg-white"}`}>
+                            Location
+                          </th>
+                          {tripDates.map((date) => (
+                            <th key={date} className={`min-w-[150px] border-l px-3 py-3 text-left text-xs font-semibold ${isDarkUI ? "border-white/10" : "border-black/5"}`}>
+                              <div>{shortDateLabel(date)}</div>
+                              <div className={`mt-0.5 font-normal ${subText}`}>{date}</div>
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(selectedTrip.locations ?? []).map((location) => {
+                          const forecastState = forecastByLocation[location.id];
+                          return (
+                            <tr key={location.id}>
+                              <th className={`sticky left-0 z-10 border-t px-4 py-3 text-left align-top text-sm font-semibold ${
+                                isDarkUI ? "border-white/10 bg-slate-950" : "border-black/5 bg-white"
+                              }`}>
+                                <div>{location.displayName}</div>
+                                <div className={`mt-1 text-xs font-normal ${subText}`}>
+                                  {location.arrivalDate} to {location.departureDate}
+                                </div>
+                                {forecastState?.loading ? <div className={`mt-2 text-xs ${subText}`}>Loading forecast...</div> : null}
+                                {forecastState?.error ? <div className="mt-2 text-xs text-red-500">{forecastState.error}</div> : null}
+                              </th>
+                              {tripDates.map((date) => {
+                                const cell = tripCellFromForecast({ forecast: forecastState?.data, location, date });
+                                const isHere = cell.isUserThere;
+                                const riskClass =
+                                  cell.riskLevel === "high"
+                                    ? isDarkUI
+                                      ? "border-red-300/40 bg-red-500/15"
+                                      : "border-red-200 bg-red-50"
+                                    : cell.riskLevel === "moderate"
+                                    ? isDarkUI
+                                      ? "border-amber-300/40 bg-amber-500/15"
+                                      : "border-amber-200 bg-amber-50"
+                                    : isDarkUI
+                                    ? "border-white/10 bg-white/5"
+                                    : "border-black/5 bg-white";
+                                return (
+                                  <td key={`${location.id}:${date}`} className={`border-l border-t p-2 align-top ${isDarkUI ? "border-white/10" : "border-black/5"}`}>
+                                    <div
+                                      className={`min-h-[116px] rounded-2xl border p-3 text-sm ${riskClass} ${
+                                        isHere ? (isDarkUI ? "ring-2 ring-emerald-300/40" : "ring-2 ring-emerald-300") : "opacity-75"
+                                      }`}
+                                    >
+                                      {isHere ? <div className="mb-2 inline-flex rounded-full bg-[#7AC943] px-2 py-0.5 text-[11px] font-semibold text-slate-950">Here</div> : null}
+                                      {cell.status === "available" ? (
+                                        <>
+                                          <div className="flex items-center justify-between gap-2">
+                                            <div className="text-lg font-semibold">{formatTemp(cell.highTemp)} / {formatTemp(cell.lowTemp)}</div>
+                                            <div className="text-2xl leading-none">{cell.conditionIcon}</div>
+                                          </div>
+                                          <div className={`mt-1 text-xs ${subText}`}>{cell.conditionLabel}</div>
+                                          <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                                            <div>Rain {formatPct(cell.precipitationChance)}</div>
+                                            <div>Wind {formatMph(cell.windSpeed)}</div>
+                                          </div>
+                                          {cell.riskSummary ? <div className="mt-2 text-xs font-semibold">{cell.riskSummary}</div> : null}
+                                        </>
+                                      ) : cell.status === "pending" ? (
+                                        <div className={`text-xs ${subText}`}>Forecast not available yet</div>
+                                      ) : forecastState?.loading ? (
+                                        <div className={`text-xs ${subText}`}>Loading...</div>
+                                      ) : (
+                                        <div className={`text-xs ${subText}`}>No forecast data</div>
+                                      )}
+                                    </div>
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
       function WeatherApp() {
         const USE_CURRENT_LOCATION_KEY = "weatherhop-use-current-location";
 
@@ -1096,10 +1760,11 @@
         const [showManage, setShowManage] = useState(false);
         const [useCurrentLocationDefault, setUseCurrentLocationDefault] = useState(
           () => localStorage.getItem(USE_CURRENT_LOCATION_KEY) === "true"
-        );
-        const [locationStatus, setLocationStatus] = useState("");
-        const [requestingLocation, setRequestingLocation] = useState(false);
-        const [showRadar, setShowRadar] = useState(false);
+	        );
+	        const [locationStatus, setLocationStatus] = useState("");
+	        const [requestingLocation, setRequestingLocation] = useState(false);
+	        const [showRadar, setShowRadar] = useState(false);
+	        const [activeView, setActiveView] = useState("weather");
 
         // Favorites selection (kept)
         const [zip, setZip] = useState(null);
@@ -2081,17 +2746,40 @@
           <div className={`${bgClass} min-h-screen transition-colors duration-700`}>
             <div className="mx-auto max-w-6xl px-4 py-8">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <div className="flex items-center">
-                    <img
-                      src="./weatherhop_logo_cropped_tight.png"
-                      alt="WeatherHop"
-                      className="h-32 w-auto sm:h-20"
-                    />
-                  </div>
-                </div>
+	                <div>
+	                  <div className="flex items-center">
+	                    <img
+	                      src="./weatherhop_logo_cropped_tight.png"
+	                      alt="WeatherHop"
+	                      className="h-32 w-auto sm:h-20"
+	                    />
+	                  </div>
+	                  <div className={`mt-3 inline-flex rounded-2xl p-1 ring-1 ${isDarkUI ? "bg-white/5 ring-white/10" : "bg-white/70 ring-black/5"}`}>
+	                    {["weather", "travel"].map((view) => (
+	                      <button
+	                        key={view}
+	                        type="button"
+	                        onClick={() => {
+	                          setShowManage(false);
+	                          setSearchOpen(false);
+	                          setActiveView(view);
+	                        }}
+	                        className={`rounded-xl px-3 py-1.5 text-sm font-semibold capitalize transition ${
+	                          activeView === view
+	                            ? isDarkUI
+	                              ? "bg-white text-black"
+	                              : "bg-slate-900 text-white"
+	                            : subText
+	                        }`}
+	                      >
+	                        {view}
+	                      </button>
+	                    ))}
+	                  </div>
+	                </div>
 
-                <div className="flex flex-wrap items-center gap-2">
+	                {activeView === "weather" ? (
+	                  <div className="flex flex-wrap items-center gap-2">
                   {/* Favorites */}
                   <div
                     className={`rounded-3xl border px-3 py-2 shadow-[0_10px_30px_rgba(0,0,0,0.10)] ${cardBg} ${borderSoft}`}
@@ -2169,8 +2857,9 @@
                         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.49.68.83 1.21 1H21a2 2 0 1 1 0 4h-.39c-.53.17-1.01.51-1.21 1Z"></path>
                       </svg>
                     </button>
-                    </div>
-                  </div>
+	                </div>
+	                ) : null}
+	              </div>
 
                   {/* Search (NEW, replaces old) */}
                   <div
@@ -2293,9 +2982,10 @@
                       <path d="M21 12a9 9 0 1 1-2.64-6.36" />
                       <path d="M21 3v6h-6" />
                     </svg>
-                  </button>
-                </div>
-              </div>
+	                  </button>
+	                </div>
+	                ) : null}
+	              </div>
 
               {showManage && (
                 <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60">
@@ -2435,7 +3125,17 @@
                 </div>
               )}
 
-              {error ? (
+	              {activeView === "travel" ? (
+	                <TravelPlanner
+	                  isDarkUI={isDarkUI}
+	                  cardBg={cardBg}
+	                  borderSoft={borderSoft}
+	                  cardText={cardText}
+	                  subText={subText}
+	                />
+	              ) : (
+	                <React.Fragment>
+	              {error ? (
                 <div
                   className={`mt-6 rounded-3xl border p-4 text-sm ${
                     isDarkUI ? "border-red-400/30 bg-red-500/10 text-red-100" : "border-red-200 bg-red-50 text-red-800"
@@ -3578,12 +4278,14 @@
               />
 
               {/* Local server tip (hidden, kept for reference) */}
-              <div className="hidden">
-                If this doesn’t load when opened as file://, run:
-                <div>python3 -m http.server 8000</div>
-                Then open: http://localhost:8000/weather.html
-              </div>
-            </div>
+	              <div className="hidden">
+	                If this doesn’t load when opened as file://, run:
+	                <div>python3 -m http.server 8000</div>
+	                Then open: http://localhost:8000/weather.html
+	              </div>
+	              </React.Fragment>
+	              )}
+	            </div>
           </div>
         );
       }
